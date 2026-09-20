@@ -226,6 +226,7 @@ add_subdirectory(schema)
 add_subdirectory(service)
 add_subdirectory(sstables)
 add_subdirectory(streaming)
+add_subdirectory(s3)
 add_subdirectory(test)
 add_subdirectory(tools)
 add_subdirectory(tracing)
@@ -266,6 +267,7 @@ target_link_libraries(scylla PRIVATE
     service
     sstables
     streaming
+    s3
     test-perf
     tools
     tracing

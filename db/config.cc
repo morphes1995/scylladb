@@ -1108,6 +1108,10 @@ db::config::config(std::shared_ptr<db::extensions> exts)
         "* 'datacenter_name': N [,...], (Default: 'dc1:1') IFF the class is NetworkTopologyStrategy, assign replication factors to each data center in a comma separated list.\n"
         "\n"
         "Related information: About replication strategy.")
+
+    , s3_http_port(this, "s3_http_port", value_status::Used, 0, "s3 API HTTP server port.")
+    , s3_address(this, "s3_address", value_status::Used, "0.0.0.0", "s3 API HTTP server listen address.")
+
     , sanitizer_report_backtrace(this, "sanitizer_report_backtrace", value_status::Used, false,
             "In debug mode, report log-structured allocator sanitizer violations with a backtrace. Slow.")
     , flush_schema_tables_after_modification(this, "flush_schema_tables_after_modification", liveness::LiveUpdate, value_status::Used, true,

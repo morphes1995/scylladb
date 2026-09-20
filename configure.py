@@ -1274,6 +1274,11 @@ redis = [
         'redis/lolwut.cc',
         ]
 
+s3 = [
+    's3/controller.cc',
+    's3/server.cc',
+]
+
 idls = ['idl/gossip_digest.idl.hh',
         'idl/uuid.idl.hh',
         'idl/range.idl.hh',
@@ -1366,7 +1371,7 @@ scylla_perfs = ['test/perf/perf_alternator.cc',
                 'seastar/tests/perf/linux_perf_event.cc']
 
 deps = {
-    'scylla': idls + ['main.cc'] + scylla_core + api + alternator + redis + scylla_tools + scylla_perfs,
+    'scylla': idls + ['main.cc'] + scylla_core + api + alternator + redis + s3 + scylla_tools + scylla_perfs,
 }
 
 pure_boost_tests = set([

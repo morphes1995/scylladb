@@ -420,6 +420,9 @@ public:
     named_value<uint16_t> redis_database_count;
     named_value<string_map> redis_keyspace_replication_strategy_options;
 
+    named_value<uint16_t> s3_http_port;
+    named_value<sstring> s3_address;
+
     named_value<bool> sanitizer_report_backtrace;
     named_value<bool> flush_schema_tables_after_modification;
 

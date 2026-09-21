@@ -1277,6 +1277,7 @@ redis = [
 s3 = [
     's3/controller.cc',
     's3/server.cc',
+    's3/utils.cc',
 ]
 
 idls = ['idl/gossip_digest.idl.hh',

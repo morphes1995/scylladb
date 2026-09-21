@@ -15,13 +15,11 @@ namespace s3 {
 static logging::logger logger("s3_controller");
 
 controller::controller(
-        sharded<gms::gossiper>& gossiper,
         sharded<service::storage_proxy>& proxy,
         sharded<qos::service_level_controller>& sl_controller,
         const db::config& config,
         seastar::scheduling_group sg)
     : protocol_server(sg)
-    , _gossiper(gossiper)
     , _proxy(proxy)
     , _sl_controller(sl_controller)
     , _config(config)
@@ -58,7 +56,7 @@ future<> controller::start_server() {
 
         net::inet_address addr = utils::resolve(_config.s3_address, std::nullopt).get();
 
-        _server.start(std::ref(_proxy), std::ref(_gossiper), std::ref(_sl_controller)).get();
+        _server.start(std::ref(_proxy), std::ref(_sl_controller)).get();
 
         // Note: from this point on, if start_server() throws for any reason,
         // it must first call stop_server() to stop the executor and server

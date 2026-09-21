@@ -3,6 +3,7 @@ target_sources(s3
   PRIVATE
     controller.cc
     server.cc
+    utils.cc
     ${cql_grammar_srcs})
 target_include_directories(s3
   PUBLIC

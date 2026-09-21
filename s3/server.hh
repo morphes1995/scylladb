@@ -18,14 +18,13 @@ namespace s3 {
 class server {
     static constexpr size_t content_length_limit = 16*MB;
     httpd::http_server _http_server;
-    [[maybe_unused]]service::storage_proxy& _proxy;
-    [[maybe_unused]]gms::gossiper& _gossiper;
-    [[maybe_unused]]qos::service_level_controller& _sl_controller;
+    service::storage_proxy& _proxy;
+    qos::service_level_controller& _sl_controller;
     utils::small_vector<std::reference_wrapper<seastar::httpd::http_server>, 2> _enabled_servers;
     seastar::gate _pending_requests;
 
 public:
-    server(service::storage_proxy& proxy, gms::gossiper& gossiper, qos::service_level_controller& sl_controller);
+    server(service::storage_proxy& proxy, qos::service_level_controller& sl_controller);
 
     future<> init(net::inet_address addr, std::optional<uint16_t> port);
     future<> stop();

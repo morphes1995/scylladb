@@ -16,10 +16,6 @@ namespace db {
 class config;
 }
 
-namespace gms {
-class gossiper;
-}
-
 namespace qos {
 class service_level_controller;
 }
@@ -31,7 +27,6 @@ using namespace seastar;
 class server;
 
 class controller : public protocol_server {
-    sharded<gms::gossiper>& _gossiper;
     sharded<service::storage_proxy>& _proxy;
     sharded<qos::service_level_controller>& _sl_controller;
     const db::config& _config;
@@ -41,7 +36,6 @@ class controller : public protocol_server {
 
 public:
     controller(
-        sharded<gms::gossiper>& gossiper,
         sharded<service::storage_proxy>& proxy,
         sharded<qos::service_level_controller>& sl_controller,
         const db::config& config,

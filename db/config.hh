@@ -182,6 +182,7 @@ public:
     named_value<sstring> commitlog_directory;
     named_value<sstring> schema_commitlog_directory;
     named_value<string_list> data_file_directories;
+    named_value<sstring> blobstore_directory;
     named_value<sstring> hints_directory;
     named_value<sstring> view_hints_directory;
     named_value<sstring> saved_caches_directory;
@@ -422,6 +423,9 @@ public:
 
     named_value<uint16_t> s3_http_port;
     named_value<sstring> s3_address;
+
+    named_value<uint32_t> blob_size_mb;
+    named_value<uint32_t> object_payload_inline_threshold;
 
     named_value<bool> sanitizer_report_backtrace;
     named_value<bool> flush_schema_tables_after_modification;

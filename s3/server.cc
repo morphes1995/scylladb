@@ -160,6 +160,8 @@ private:
                 row.cells().apply(cdef, atomic_cell::make_live(*cdef.type, now, std::move(cdef.type->decompose(size))));
             }else if(cdef.name_as_text() == "payload"){
                 row.cells().apply(cdef, atomic_cell::make_live(*cdef.type, now, std::move(payload_bytes)));
+            }else if(cdef.name_as_text() == "inlined"){
+                row.cells().apply(cdef, atomic_cell::make_live(*cdef.type, now,  std::move(cdef.type->decompose(true))));
             }
         }
 

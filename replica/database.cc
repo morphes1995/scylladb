@@ -18,6 +18,7 @@
 #include "db/system_keyspace_sstables_registry.hh"
 #include "db/system_distributed_keyspace.hh"
 #include "db/commitlog/commitlog.hh"
+#include "db/blobstore/blobstore.hh"
 #include "db/config.hh"
 #include "db/extensions.hh"
 #include "cql3/functions/functions.hh"
@@ -783,6 +784,13 @@ database::init_commitlog() {
     });
 }
 
+future<> database::init_blobstore(){
+    db::blobstore_config cfg = db::blobstore_config::from_db_config(_cfg);
+    db::blobstore bs(std::move(cfg));
+    _blobstore = std::make_unique<db::blobstore>(std::move(bs));
+    co_await _blobstore->init();
+}
+
 future<> database::modify_keyspace_on_all_shards(sharded<database>& sharded_db, std::function<future<>(replica::database&)> func, std::function<future<>(replica::database&)> notifier) {
     // Run func first on shard 0
     // to allow "seeding" of the effective_replication_map
@@ -922,7 +930,7 @@ future<> database::add_column_family(keyspace& ks, schema_ptr schema, column_fam
     cf->set_durable_writes(ks.metadata()->durable_writes());
 
     if (is_new) {
-        cf->mark_ready_for_writes(commitlog_for(schema));
+        cf->mark_ready_for_writes(commitlog_for(schema), _blobstore.get());
         cf->set_truncation_time(db_clock::time_point::min());
     }
 
@@ -1902,7 +1910,8 @@ future<> database::do_apply_many(const std::vector<frozen_mutation>& muts, db::t
     }
 }
 
-future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::trace_state_ptr tr_state, db::timeout_clock::time_point timeout, db::commitlog::force_sync sync, db::per_partition_rate_limit::info rate_limit_info) {
+future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::trace_state_ptr tr_state, db::timeout_clock::time_point timeout,
+                            db::commitlog::force_sync sync, db::per_partition_rate_limit::info rate_limit_info) {
     ++_stats->total_writes;
     // assume failure until proven otherwise
     auto update_writes_failed = defer([&] { ++_stats->total_writes_failed; });
@@ -1922,6 +1931,66 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::tra
             co_await coroutine::return_exception(replica::rate_limit_exception());
         }
     }
+
+    if(s->is_s3_object_meta_table()){
+        bool mutation_updated = false;
+        mutation origin_mutation = m.unfreeze(s);
+        mutation_partition& mp = origin_mutation.partition();
+        const column_definition* payload_cdef = s->get_column_definition(bytes("payload"));
+        for (rows_entry& re : mp.mutable_clustered_rows()) {
+                deletable_row& row = re.row();
+                auto ts = row.cells().cell_at(payload_cdef->id).as_atomic_cell(*payload_cdef).timestamp();
+                atomic_cell_view cv = row.cells().cell_at(payload_cdef->id).as_atomic_cell(*payload_cdef);
+                bytes payload = cv.value().linearize();
+                dblog.debug( "before write payload, payload size: {}",payload.size());
+                if(payload.size() <= _cfg.object_payload_inline_threshold()){
+                    // tiny payload inlined into object meta
+                    continue;
+                }
+
+                mutation_updated = true;
+                // save object payload to blobstore, and return the payload position info
+                std::exception_ptr ex;
+                payload_pos pos;
+                auto f_pos = co_await coroutine::as_future(cf.blobstore()->add_payload(std::move(payload), payload.size()));
+                if (!f_pos.failed()) {
+                    pos = f_pos.get();
+                } else {
+                    ex = f_pos.get_exception();
+                }
+                if(ex){
+                    co_await coroutine::exception(std::move(ex));
+                }
+
+                dblog.debug(" payload pos: blob {}, offset {}", pos.blob_id, pos.offset);
+
+                const column_definition* inlined_cdef = s->get_column_definition(bytes("inlined"));
+                const column_definition* blob_id_cdef = s->get_column_definition(bytes("blob_id"));
+                const column_definition* offset_cdef = s->get_column_definition(bytes("offset"));
+
+                // remove payload cell and inlined cell from object meta
+                row.cells().remove_if([&] (column_id id, atomic_cell_or_collection& c) {
+                    if(id == payload_cdef->id){
+                        return true;
+                    }
+                    if(id == inlined_cdef->id){
+                        return true;
+                    }
+                    return false;
+                });
+
+                // update object data inlined status to false
+                row.cells().apply(*inlined_cdef, atomic_cell::make_live(*(inlined_cdef->type), ts,  std::move(inlined_cdef->type->decompose(false))));
+                // add payload position info to object meta
+                row.cells().apply(*blob_id_cdef, atomic_cell::make_live(*(blob_id_cdef->type), ts,  std::move(blob_id_cdef->type->decompose(int64_t(pos.blob_id)))));
+                row.cells().apply(*offset_cdef, atomic_cell::make_live(*(offset_cdef->type), ts,  std::move(offset_cdef->type->decompose(int64_t(pos.offset)))));
+            }
+
+        if(mutation_updated){
+            const_cast<frozen_mutation&>(m) = freeze(origin_mutation);
+        }
+    }
+
 
     sync = sync || db::commitlog::force_sync(s->wait_for_sync_to_commitlog());
 
@@ -2186,6 +2255,7 @@ future<> database::start() {
     _large_data_handler->start();
     // We need the compaction manager ready early so we can reshard.
     _compaction_manager.enable();
+    co_await init_blobstore();
     co_await init_commitlog();
 }
 

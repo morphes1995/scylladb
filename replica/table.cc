@@ -2310,6 +2310,7 @@ table::table(schema_ptr schema, config config, lw_shared_ptr<const storage_optio
     , _sstables(make_compound_sstable_set())
     , _cache(_schema, sstables_as_snapshot_source(), row_cache_tracker, is_continuous::yes)
     , _commitlog(nullptr)
+    , _blobstore(nullptr)
     , _readonly(true)
     , _durable_writes(true)
     , _sstables_manager(sst_manager)
@@ -2922,13 +2923,16 @@ future<db::replay_position> table::discard_sstables(db_clock::time_point truncat
     co_return rp;
 }
 
-void table::mark_ready_for_writes(db::commitlog* cl) {
+void table::mark_ready_for_writes(db::commitlog* cl, db::blobstore* bs) {
     if (!_readonly) {
         on_internal_error(dblog, ::format("table {}.{} is already writable", _schema->ks_name(), _schema->cf_name()));
     }
     update_sstables_known_generation(sstables::generation_from_value(0));
     if (_config.enable_commitlog) {
         _commitlog = cl;
+    }
+    if(bs){
+        _blobstore = bs;
     }
     _readonly = false;
 }
@@ -2938,6 +2942,10 @@ db::commitlog* table::commitlog() const {
         on_internal_error(dblog, ::format("table {}.{} is readonly", _schema->ks_name(), _schema->cf_name()));
     }
     return _commitlog;
+}
+
+db::blobstore* table::blobstore() const {
+    return _blobstore;
 }
 
 void table::set_schema(schema_ptr s) {

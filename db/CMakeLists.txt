@@ -13,6 +13,8 @@ target_sources(db
     commitlog/commitlog.cc
     commitlog/commitlog_replayer.cc
     commitlog/commitlog_entry.cc
+    blobstore/blobstore.cc
+    blobstore/blob.cc
     data_listeners.cc
     functions/function.cc
     hints/internal/hint_endpoint_manager.cc

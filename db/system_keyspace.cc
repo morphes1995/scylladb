@@ -2306,7 +2306,7 @@ future<> system_keyspace::make(
 
 void system_keyspace::mark_writable() {
     for (auto&& table : system_keyspace::all_tables(_db.get_config())) {
-        _db.find_column_family(table).mark_ready_for_writes(_db.commitlog_for(table));
+        _db.find_column_family(table).mark_ready_for_writes(_db.commitlog_for(table), _db.blobstore());
     }
 }
 

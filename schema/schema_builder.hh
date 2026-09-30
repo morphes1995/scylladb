@@ -73,6 +73,9 @@ public:
     }
     schema_builder& set_comment(const sstring& s) {
         _raw._comment = s;
+        if(s == "s3_object_meta_table"){
+            _raw._is_s3_object_meta_table = true;
+        }
         return *this;
     }
     const sstring& comment() const {

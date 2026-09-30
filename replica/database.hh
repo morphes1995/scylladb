@@ -32,6 +32,7 @@
 #include <seastar/core/gate.hh>
 #include "db/commitlog/replay_position.hh"
 #include "db/commitlog/commitlog_types.hh"
+#include "db/blobstore/blobstore.hh"
 #include "schema/schema_fwd.hh"
 #include "db/view/view.hh"
 #include "db/snapshot-ctl.hh"
@@ -471,6 +472,9 @@ private:
 
     // Provided by the database that owns this commitlog
     db::commitlog* _commitlog;
+
+    db::blobstore* _blobstore;
+
     // The table is constructed in readonly mode - this flag is true after the constructor finishes.
     // This allows to read the table on the early stages of the node boot process,
     // when the commitlog is not yet initialized.
@@ -732,7 +736,7 @@ public:
     // to a db in memory only, and if anybody is about to write to a CF, that was most
     // likely already called. We need to call this explicitly when we are sure we're ready
     // to issue disk operations safely.
-    void mark_ready_for_writes(db::commitlog* cl);
+    void mark_ready_for_writes(db::commitlog* cl, db::blobstore* bs = nullptr);
 
     // Creates a mutation reader which covers all data sources for this column family.
     // Caller needs to ensure that column_family remains live (FIXME: relax this).
@@ -863,6 +867,7 @@ public:
     const schema_ptr& schema() const { return _schema; }
     void set_schema(schema_ptr);
     db::commitlog* commitlog() const;
+    db::blobstore* blobstore() const;
     const locator::effective_replication_map_ptr& get_effective_replication_map() const { return _erm; }
     future<> update_effective_replication_map(locator::effective_replication_map_ptr);
     [[gnu::always_inline]] bool uses_tablets() const;
@@ -1508,6 +1513,7 @@ private:
     tables_metadata _tables_metadata;
     std::unique_ptr<db::commitlog> _commitlog;
     std::unique_ptr<db::commitlog> _schema_commitlog;
+    std::unique_ptr<db::blobstore> _blobstore;
     utils::updateable_value_source<table_schema_version> _version;
     uint32_t _schema_change_count = 0;
     // compaction_manager object is referenced by all column families of a database.
@@ -1550,6 +1556,7 @@ public:
     std::shared_ptr<data_dictionary::user_types_storage> as_user_types_storage() const noexcept;
     const data_dictionary::user_types_storage& user_types() const noexcept;
     future<> init_commitlog();
+    future<> init_blobstore();
     const gms::feature_service& features() const { return _feat; }
     future<> apply_in_memory(const frozen_mutation& m, schema_ptr m_schema, db::rp_handle&&, db::timeout_clock::time_point timeout);
     future<> apply_in_memory(const mutation& m, column_family& cf, db::rp_handle&&, db::timeout_clock::time_point timeout);
@@ -1628,6 +1635,11 @@ public:
     db::commitlog* schema_commitlog() const {
         return _schema_commitlog.get();
     }
+
+    db::blobstore* blobstore() const {
+        return _blobstore.get();
+    }
+
     replica::cf_stats* cf_stats() {
         return &_cf_stats;
     }

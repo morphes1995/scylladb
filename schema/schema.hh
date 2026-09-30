@@ -575,6 +575,7 @@ private:
         bool _is_dense = false;
         bool _is_compound = true;
         bool _is_counter = false;
+        bool _is_s3_object_meta_table = false;
         cf_type _type = cf_type::standard;
         int32_t _gc_grace_seconds = DEFAULT_GC_GRACE_SECONDS;
         std::optional<int32_t> _paxos_grace_seconds;
@@ -694,6 +695,9 @@ public:
     }
     const sstring& comment() const {
         return _raw._comment;
+    }
+    bool is_s3_object_meta_table() const {
+        return _raw._is_s3_object_meta_table;
     }
     bool is_counter() const {
         return _raw._is_counter;

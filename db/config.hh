@@ -182,6 +182,7 @@ public:
     named_value<sstring> commitlog_directory;
     named_value<sstring> schema_commitlog_directory;
     named_value<string_list> data_file_directories;
+    named_value<sstring> blobstore_directory;
     named_value<sstring> hints_directory;
     named_value<sstring> view_hints_directory;
     named_value<sstring> saved_caches_directory;

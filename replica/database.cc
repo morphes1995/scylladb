@@ -18,6 +18,7 @@
 #include "db/system_keyspace_sstables_registry.hh"
 #include "db/system_distributed_keyspace.hh"
 #include "db/commitlog/commitlog.hh"
+#include "db/blobstore/blobstore.hh"
 #include "db/config.hh"
 #include "db/extensions.hh"
 #include "cql3/functions/functions.hh"
@@ -783,6 +784,14 @@ database::init_commitlog() {
     });
 }
 
+future<> database::init_blobstore(){
+    db::blobstore_config cfg = db::blobstore_config::from_db_config(_cfg);
+
+    return db::blobstore::create_blobstore(cfg).then([this](db::blobstore &&store){
+        _blobstore = std::make_unique<db::blobstore>(std::move(store));
+    });
+}
+
 future<> database::modify_keyspace_on_all_shards(sharded<database>& sharded_db, std::function<future<>(replica::database&)> func, std::function<future<>(replica::database&)> notifier) {
     // Run func first on shard 0
     // to allow "seeding" of the effective_replication_map
@@ -922,7 +931,7 @@ future<> database::add_column_family(keyspace& ks, schema_ptr schema, column_fam
     cf->set_durable_writes(ks.metadata()->durable_writes());
 
     if (is_new) {
-        cf->mark_ready_for_writes(commitlog_for(schema));
+        cf->mark_ready_for_writes(commitlog_for(schema), _blobstore.get());
         cf->set_truncation_time(db_clock::time_point::min());
     }
 
@@ -1902,7 +1911,8 @@ future<> database::do_apply_many(const std::vector<frozen_mutation>& muts, db::t
     }
 }
 
-future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::trace_state_ptr tr_state, db::timeout_clock::time_point timeout, db::commitlog::force_sync sync, db::per_partition_rate_limit::info rate_limit_info) {
+future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::trace_state_ptr tr_state, db::timeout_clock::time_point timeout,
+                            db::commitlog::force_sync sync, db::per_partition_rate_limit::info rate_limit_info) {
     ++_stats->total_writes;
     // assume failure until proven otherwise
     auto update_writes_failed = defer([&] { ++_stats->total_writes_failed; });
@@ -1922,6 +1932,85 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::tra
             co_await coroutine::return_exception(replica::rate_limit_exception());
         }
     }
+
+    bool s3_object_meta = true;
+    if(s3_object_meta){
+        mutation origin_mutation = m.unfreeze(s);
+        mutation_partition& mp = origin_mutation.partition();
+
+//        if (mp._tombstone) {
+//            out = fmt::format_to(out, "{}tombstone: {},\n", indent, mp._tombstone);
+//        }
+//        if (!mp._row_tombstones.empty()) {
+//            out = fmt::format_to(out, "{}range_tombstones: {{{}}},\n", indent, fmt::join(prefixed("\n    ", mp._row_tombstones), ","));
+//        }
+//
+//        if (!mp.static_row().empty()) {
+//            out = fmt::format_to(out, "{}static_row: {{\n", indent);
+//            const auto& srow = mp.static_row().get();
+//            srow.for_each_cell([&] (column_id& c_id, const atomic_cell_or_collection& cell) {
+//                auto& column_def = p._schema.column_at(column_kind::static_column, c_id);
+//                out = fmt::format_to(out, "{}{}'{}':{},\n",
+//                                     indent, indent, column_def.name_as_text(),
+//                                     atomic_cell_or_collection::printer(column_def, cell));
+//            });
+//            out = fmt::format_to(out, "{}}},\n", indent);
+//        }
+//
+//        out = fmt::format_to(out, "{}rows: [\n", indent);
+//
+//        for (const auto& re : mp.clustered_rows()) {
+//            out = fmt::format_to(out, "{}{}{{\n", indent, indent);
+//
+//            const auto& row = re.row();
+//            out = fmt::format_to(out, "{}{}{}cont: {},\n", indent, indent, indent,
+//                                 re.continuous());
+//            out = fmt::format_to(out, "{}{}{}dummy: {},\n", indent, indent, indent,
+//                                 re.dummy());
+//            if (!row.marker().is_missing()) {
+//                out = fmt::format_to(out, "{}{}{}marker: {},\n", indent, indent, indent,
+//                                     row.marker());
+//            }
+//            if (row.deleted_at()) {
+//                out = fmt::format_to(out, "{}{}{}tombstone: {},\n", indent, indent, indent,
+//                                     row.deleted_at());
+//            }
+//
+//            position_in_partition pip(re.position());
+//            if (pip.get_clustering_key_prefix()) {
+//                out = fmt::format_to(out, "{}{}{}position: {{\n", indent, indent, indent);
+//
+//                auto ck = *pip.get_clustering_key_prefix();
+//                auto type_iterator = ck.get_compound_type(p._schema)->types().begin();
+//                auto column_iterator = p._schema.clustering_key_columns().begin();
+//
+//                out = fmt::format_to(out, "{}{}{}{}bound_weight: {},\n", indent, indent, indent, indent,
+//                                     int32_t(pip.get_bound_weight()));
+//
+//                for (auto&& e : ck.components(p._schema)) {
+//                    out = fmt::format_to(out, "{}{}{}{}'{}': {},\n", indent, indent, indent, indent,
+//                                         column_iterator->name_as_text(),
+//                                         (*type_iterator)->to_string(to_bytes(e)));
+//                    ++type_iterator;
+//                    ++column_iterator;
+//                }
+//
+//                out = fmt::format_to(out, "{}{}{}}},\n", indent, indent, indent);
+//            }
+//
+//            row.cells().for_each_cell([&] (column_id& c_id, const atomic_cell_or_collection& cell) {
+//                auto& column_def = p._schema.column_at(column_kind::regular_column, c_id);
+//                out = fmt::format_to(out, "{}{}{}'{}': {},\n", indent, indent, indent,
+//                               column_def.name_as_text(),
+//                               atomic_cell_or_collection::printer(column_def, cell));
+//            });
+//
+//            out = fmt::format_to(out, "{}{}}},\n", indent, indent);
+//        }
+
+
+    }
+
 
     sync = sync || db::commitlog::force_sync(s->wait_for_sync_to_commitlog());
 
@@ -2186,6 +2275,7 @@ future<> database::start() {
     _large_data_handler->start();
     // We need the compaction manager ready early so we can reshard.
     _compaction_manager.enable();
+    co_await init_blobstore();
     co_await init_commitlog();
 }
 

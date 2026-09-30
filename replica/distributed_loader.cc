@@ -459,7 +459,7 @@ future<> distributed_loader::populate_keyspace(distributed<replica::database>& d
         if (!is_system_keyspace(ks_name)) {
             co_await smp::invoke_on_all([&] {
                 auto s = gtable->schema();
-                db.local().find_column_family(s).mark_ready_for_writes(db.local().commitlog_for(s));
+                db.local().find_column_family(s).mark_ready_for_writes(db.local().commitlog_for(s), db.local().blobstore());
             });
         }
     });

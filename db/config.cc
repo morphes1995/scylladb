@@ -414,6 +414,8 @@ db::config::config(std::shared_ptr<db::extensions> exts)
         "The directory where the schema commit log is stored. This is a special commitlog instance used for schema and system tables. For optimal write performance, it is recommended the commit log be on a separate disk partition (ideally, a separate physical device) from the data file directories.")
     , data_file_directories(this, "data_file_directories", "datadir", value_status::Used, { },
         "The directory location where table data (SSTables) is stored.")
+    , blobstore_directory(this, "blobstore_directory", value_status::Used, "",
+        "The directory location where large blob column data is stored.")
     , hints_directory(this, "hints_directory", value_status::Used, "",
         "The directory where hints files are stored if hinted handoff is enabled.")
     , view_hints_directory(this, "view_hints_directory", value_status::Used, "",
@@ -1203,6 +1205,7 @@ void db::config::setup_directories() {
     }
     maybe_in_workdir(schema_commitlog_directory, "schema_commitlog");
     maybe_in_workdir(data_file_directories, "data");
+    maybe_in_workdir(blobstore_directory, "blobstore");
     maybe_in_workdir(hints_directory, "hints");
     maybe_in_workdir(view_hints_directory, "view_hints");
     maybe_in_workdir(saved_caches_directory, "saved_caches");

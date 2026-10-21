@@ -5,6 +5,7 @@
 #include <seastar/core/stream.hh>
 #include <seastar/core/rwlock.hh>
 #include "db/config.hh"
+#include "utils/flush_queue.hh"
 
 using namespace seastar;
 
@@ -92,6 +93,7 @@ public:
          , _alignment(align)
          , _size(size)
          , _file_pos(file_pos)
+         , _pending_ops(true)
     {
         if (_file_pos >= _size){
             _closed = true;
@@ -117,9 +119,12 @@ private:
 
     uint64_t _file_pos = 0;
     uint64_t _flush_pos = 0;
+    utils::flush_queue<uint64_t, std::less<uint64_t>, lowres_clock> _pending_ops;
 
     rwlock _lock; // used as a barrier between write & flush
     bool _closed = false;
+
+    future<> do_flush(uint64_t pos);
 };
 
 }

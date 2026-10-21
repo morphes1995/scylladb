@@ -55,8 +55,8 @@ public:
     blobstore(blobstore_config &&cfg);
     future<> init();
 
-    future<payload_pos> add_payload(bytes&& payload, size_t size);
-    buffer_type acquire_buffer(size_t s);
+    future<payload_pos> add_payload(managed_bytes_view payload_view, size_t size);
+    buffer_type acquire_buffer(size_t s, size_t alignment);
     void release_buffer(buffer_type&& b);
 
 private:
@@ -85,7 +85,6 @@ private:
  */
 class blob : public enable_shared_from_this<blob>{
 public:
-    static constexpr size_t alignment = 4096;
     blob(blobstore *bs, file&& f, const blob_descriptor& d, size_t align, size_t size, size_t file_pos = 0):
          _bs(bs)
          , _f(f)
@@ -106,7 +105,7 @@ public:
     void set_sealed() {
         _closed = true;
     };
-    future<payload_pos> append(bytes&& payload, size_t size);
+    future<payload_pos> append(managed_bytes_view payload_view, size_t size);
 
 
 private:

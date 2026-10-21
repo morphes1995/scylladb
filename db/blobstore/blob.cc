@@ -17,16 +17,19 @@ bool db::blob::is_still_writing(size_t size){
 }
 
 future<db::payload_pos>
-db::blob::append(bytes&& payload, size_t size){
+db::blob::append(managed_bytes_view payload_view, size_t size){
     payload_pos pos(_desc.id(), _file_pos);
     blogger.debug("writing to {}:{}", _desc.filename(), _file_pos);
 
     auto size_aligned = align_up(size, _alignment);
     auto padding = size_aligned - size;
-    blobstore::buffer_type buf = _bs->acquire_buffer(size_aligned);
+    blobstore::buffer_type buf = _bs->acquire_buffer(size_aligned, _alignment);
     auto out = simple_memory_output_stream(buf.get_write(), buf.size());
+
     // todo : add crc and payload object meta info
-    out.write(reinterpret_cast<const char*>(payload.data()), payload.size());
+    for (bytes_view fragment : fragment_range(payload_view)) {
+        out.write(reinterpret_cast<const char*>(fragment.data()), fragment.size());
+    }
     out.fill(0, padding);
     SCYLLA_ASSERT(out.size() == buf.size() - size_aligned);
 

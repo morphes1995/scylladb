@@ -1941,9 +1941,8 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::tra
                 deletable_row& row = re.row();
                 auto ts = row.cells().cell_at(payload_cdef->id).as_atomic_cell(*payload_cdef).timestamp();
                 atomic_cell_view cv = row.cells().cell_at(payload_cdef->id).as_atomic_cell(*payload_cdef);
-                bytes payload = cv.value().linearize();
-                dblog.debug( "before write payload, payload size: {}",payload.size());
-                if(payload.size() <= _cfg.object_payload_inline_threshold()){
+                dblog.debug( "before write payload, payload size: {}",cv.value_size());
+                if(cv.value_size() <= _cfg.object_payload_inline_threshold()){
                     // tiny payload inlined into object meta
                     continue;
                 }
@@ -1952,7 +1951,7 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::tra
                 // save object payload to blobstore, and return the payload position info
                 std::exception_ptr ex;
                 payload_pos pos;
-                auto f_pos = co_await coroutine::as_future(cf.blobstore()->add_payload(std::move(payload), payload.size()));
+                auto f_pos = co_await coroutine::as_future(cf.blobstore()->add_payload(cv.value(), cv.value_size()));
                 if (!f_pos.failed()) {
                     pos = f_pos.get();
                 } else {

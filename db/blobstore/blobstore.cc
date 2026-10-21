@@ -88,9 +88,9 @@ future<> db::blobstore::init(){
 
 
 future<db::payload_pos>
-db::blobstore::add_payload(bytes&& payload, size_t size){
+db::blobstore::add_payload(managed_bytes_view payload_view, size_t size){
     auto b = co_await writing_blob(size);
-    auto pos = co_await b->append(std::move(payload), size);
+    auto pos = co_await b->append(payload_view, size);
 
     co_return pos;
 }
@@ -175,7 +175,7 @@ db::blobstore::list_blobs(sstring &dirname) const {
     co_return result;
 }
 
-db::blobstore::buffer_type db::blobstore::acquire_buffer(size_t s) {
+db::blobstore::buffer_type db::blobstore::acquire_buffer(size_t s, size_t alignment) {
     auto i = buffers.begin();
     auto e = buffers.end();
 
@@ -187,7 +187,7 @@ db::blobstore::buffer_type db::blobstore::acquire_buffer(size_t s) {
         }
         ++i;
     }
-    auto a = ::memalign(blob::alignment, s);
+    auto a = ::memalign(alignment, s);
     if (a == nullptr) {
         throw std::bad_alloc();
     }

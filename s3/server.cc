@@ -125,16 +125,18 @@ private:
         s3_op_handle_result res;
 
         int32_t size = req->content_length;
-        s3logger.debug("object {} in bucket {}, size: {}", object, bucket, size);
-        SCYLLA_ASSERT(req->content_stream);
-        auto payload = co_await util::read_entire_stream_contiguous(*req->content_stream);
+        auto reader = fragmented_temporary_buffer::reader();
+        auto payload_fragmented_buffers = co_await reader.read_exactly(*req->content_stream, size);
+        auto payload_frag_buffers_view = fragmented_temporary_buffer::view(payload_fragmented_buffers);
         md5_hasher h;
-        h.update(payload.c_str(), payload.size());
+        for (auto&& frag : payload_frag_buffers_view) {
+            s3logger.debug("frag size {}", frag.size());
+            h.update(reinterpret_cast<const char *>(frag.data()), frag.size());
+        }
         auto md5sum = to_sstring(h.finalize());
-        s3logger.debug("object {} in bucket {}, md5 hash: {}, size {}", object, bucket, md5sum, payload.size());
+        s3logger.debug("object {} in bucket {}, md5 hash: {}, size {}", object, bucket, md5sum, payload_frag_buffers_view.size_bytes());
         res.header["Etag"] = md5sum;
 
-        auto payload_bytes = to_bytes(std::move(payload));
         schema_ptr schema;
         try{
            schema =  _proxy.data_dictionary().find_schema("s3", "object_metadata");
@@ -159,7 +161,7 @@ private:
             if(cdef.name_as_text() == "size"){
                 row.cells().apply(cdef, atomic_cell::make_live(*cdef.type, now, std::move(cdef.type->decompose(size))));
             }else if(cdef.name_as_text() == "payload"){
-                row.cells().apply(cdef, atomic_cell::make_live(*cdef.type, now, std::move(payload_bytes)));
+                row.cells().apply(cdef, atomic_cell::make_live(*cdef.type, now, payload_frag_buffers_view));
             }else if(cdef.name_as_text() == "inlined"){
                 row.cells().apply(cdef, atomic_cell::make_live(*cdef.type, now,  std::move(cdef.type->decompose(true))));
             }

@@ -1921,12 +1921,12 @@ future<> sstable::seal_sstable(bool backup)
     }
 }
 
-sstable_writer sstable::get_writer(const schema& s, uint64_t estimated_partitions,
+sstable_writer sstable::get_writer(const schema& s, db::blobstore* blobstore, uint64_t estimated_partitions,
         const sstable_writer_config& cfg, encoding_stats enc_stats, shard_id shard)
 {
     // Mark sstable for implicit deletion if destructed before it is sealed.
     _marked_for_deletion = mark_for_deletion::implicit;
-    return sstable_writer(*this, s, estimated_partitions, cfg, enc_stats, shard);
+    return sstable_writer(*this, s, blobstore, estimated_partitions, cfg, enc_stats, shard);
 }
 
 future<uint64_t> sstable::validate(reader_permit permit, abort_source& abort,
@@ -2036,14 +2036,15 @@ void sstable::assert_large_data_handler_is_running() {
 
 future<> sstable::write_components(
         mutation_reader mr,
+        db::blobstore* blobstore,
         uint64_t estimated_partitions,
         schema_ptr schema,
         const sstable_writer_config& cfg,
         encoding_stats stats) {
     assert_large_data_handler_is_running();
-    return seastar::async([this, mr = std::move(mr), estimated_partitions, schema = std::move(schema), cfg, stats] () mutable {
+    return seastar::async([this, mr = std::move(mr), blobstore, estimated_partitions, schema = std::move(schema), cfg, stats] () mutable {
         auto close_mr = deferred_close(mr);
-        auto wr = get_writer(*schema, estimated_partitions, cfg, stats);
+        auto wr = get_writer(*schema, blobstore, estimated_partitions, cfg, stats);
         mr.consume_in_thread(std::move(wr));
     }).finally([this] {
         assert_large_data_handler_is_running();

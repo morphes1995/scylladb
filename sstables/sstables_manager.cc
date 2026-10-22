@@ -150,6 +150,8 @@ sstable_writer_config sstables_manager::configure_writer(sstring origin) const {
 
     cfg.origin = std::move(origin);
 
+    cfg.object_payload_inline_threshold_when_flush = _db_config.object_payload_inline_threshold_when_flush;
+
     return cfg;
 }
 

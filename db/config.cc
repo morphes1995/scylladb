@@ -1115,7 +1115,9 @@ db::config::config(std::shared_ptr<db::extensions> exts)
     , s3_address(this, "s3_address", value_status::Used, "0.0.0.0", "s3 API HTTP server listen address.")
 
     , blob_size_mb(this, "blob_size_mb", value_status::Used, 1024, "specify blob file max size in mb")
-    , object_payload_inline_threshold(this, "object_payload_inline_threshold", value_status::Used, 4096, "object payload size less than this will inlined into object meta")
+    , object_payload_inline_threshold(this, "object_payload_inline_threshold", value_status::Used, 4096, "object payload size less than this will inlined into object meta cf's commitlog entry")
+    , object_payload_inline_threshold_when_flush(this, "object_payload_inline_threshold_when_flush", value_status::Used, 0,
+                                                 "object payload size less than this will inlined into object meta cf's sstable data file")
 
     , sanitizer_report_backtrace(this, "sanitizer_report_backtrace", value_status::Used, false,
             "In debug mode, report log-structured allocator sanitizer violations with a backtrace. Slow.")

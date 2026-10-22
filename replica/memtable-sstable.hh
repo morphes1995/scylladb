@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include "db/blobstore/blobstore.hh"
 #include "sstables/shared_sstable.hh"
 #include <seastar/core/future.hh>
 
@@ -31,6 +32,7 @@ class memtable;
 seastar::future<>
 write_memtable_to_sstable(mutation_reader reader,
         memtable& mt, sstables::shared_sstable sst,
+        db::blobstore* blobstore,
         size_t estimated_partitions,
         sstables::write_monitor& monitor,
         sstables::sstable_writer_config& cfg);

@@ -1535,7 +1535,7 @@ table::try_flush_memtable_to_sstable(compaction_group& cg, lw_shared_ptr<memtabl
             auto monitor = database_sstable_write_monitor(permit, newtab, cg,
                 old->get_max_timestamp());
 
-            co_return co_await write_memtable_to_sstable(std::move(reader), *old, newtab, estimated_partitions, monitor, cfg);
+            co_return co_await write_memtable_to_sstable(std::move(reader), *old, newtab, blobstore(), estimated_partitions, monitor, cfg);
           } catch (...) {
             ex = std::current_exception();
           }
@@ -3203,6 +3203,7 @@ template void table::do_apply(compaction_group& cg, db::rp_handle&&, const froze
 future<>
 write_memtable_to_sstable(mutation_reader reader,
                           memtable& mt, sstables::shared_sstable sst,
+                          db::blobstore* blobstore,
                           size_t estimated_partitions,
                           sstables::write_monitor& monitor,
                           sstables::sstable_writer_config& cfg) {
@@ -3210,7 +3211,7 @@ write_memtable_to_sstable(mutation_reader reader,
     cfg.monitor = &monitor;
     cfg.origin = "memtable";
     schema_ptr s = reader.schema();
-    return sst->write_components(std::move(reader), estimated_partitions, s, cfg, mt.get_encoding_stats());
+    return sst->write_components(std::move(reader), blobstore, estimated_partitions, s, cfg, mt.get_encoding_stats());
 }
 
 future<>

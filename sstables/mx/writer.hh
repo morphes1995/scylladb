@@ -17,6 +17,7 @@ namespace mc {
 
 std::unique_ptr<sstable_writer::writer_impl> make_writer(sstable& sst,
     const schema& s,
+    db::blobstore* blobstore,
     uint64_t estimated_partitions,
     const sstable_writer_config& cfg,
     encoding_stats enc_stats,

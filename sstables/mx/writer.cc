@@ -757,10 +757,10 @@ private:
     }
 public:
 
-    writer(sstable& sst, const schema& s, uint64_t estimated_partitions,
+    writer(sstable& sst, const schema& s, db::blobstore* blobstore, uint64_t estimated_partitions,
         const sstable_writer_config& cfg, encoding_stats enc_stats,
         shard_id shard = this_shard_id())
-        : sstable_writer::writer_impl(sst, s, cfg)
+        : sstable_writer::writer_impl(sst, s, blobstore, cfg)
         , _enc_stats(enc_stats)
         , _shard(shard)
         , _tmp_bufs(_sst.sstable_buffer_size)
@@ -1205,6 +1205,58 @@ void writer::write_row_body(bytes_ostream& writer, const clustering_row& row, bo
         }
     }
 
+    if(_schema.is_s3_object_meta_table()){
+        const column_definition* inlined_cdef = s->get_column_definition(bytes("inlined"));
+        auto inlined_cell = row.cells().cell_at(inlined_cdef->id).as_atomic_cell(*payload_cdef);
+        if(data_value(false) == boolean_type->deserialize(inlined_cell.serialize()){
+            slogger.debug( "before flush object meta, payload is not inlined, skip ");
+            continue;
+        }
+
+        const column_definition* payload_cdef = s->get_column_definition(bytes("payload"));
+        auto ts = row.cells().cell_at(payload_cdef->id).as_atomic_cell(*payload_cdef).timestamp();
+        atomic_cell_view cv = row.cells().cell_at(payload_cdef->id).as_atomic_cell(*payload_cdef);
+        slogger.debug( "before flush object meta, payload size: {}, threshold {}",cv.value_size(), _cfg.object_payload_inline_threshold_when_flush);
+        if(cv.value_size() <= _cfg.object_payload_inline_threshold_when_flush){
+            // tiny payload inlined into sstable data file
+            continue;
+        }
+
+        // save object payload to blobstore, and return the payload position info
+        std::exception_ptr ex;
+        payload_pos pos;
+        auto f_pos = co_await coroutine::as_future(_blobstore->add_payload(cv.value(), cv.value_size()));
+        if (!f_pos.failed()) {
+            pos = f_pos.get();
+        } else {
+            ex = f_pos.get_exception();
+        }
+        if(ex){
+            co_await coroutine::exception(std::move(ex));
+        }
+
+        slogger.debug(" payload flushed to blob {}, offset {}", pos.blob_id, pos.offset);
+
+        const column_definition* blob_id_cdef = s->get_column_definition(bytes("blob_id"));
+        const column_definition* offset_cdef = s->get_column_definition(bytes("offset"));
+        // remove payload cell and inlined cell from object meta
+        row.cells().remove_if([&] (column_id id, atomic_cell_or_collection& c) {
+            if(id == payload_cdef->id){
+                return true;
+            }
+            if(id == inlined_cdef->id){
+                return true;
+            }
+            return false;
+        });
+
+        // update object data inlined status to false
+        row.cells().apply(*inlined_cdef, atomic_cell::make_live(*(inlined_cdef->type), ts,  std::move(inlined_cdef->type->decompose(false))));
+        // add payload position info to object meta
+        row.cells().apply(*blob_id_cdef, atomic_cell::make_live(*(blob_id_cdef->type), ts,  std::move(blob_id_cdef->type->decompose(int64_t(pos.blob_id)))));
+        row.cells().apply(*offset_cdef, atomic_cell::make_live(*(offset_cdef->type), ts,  std::move(offset_cdef->type->decompose(int64_t(pos.offset)))));
+    }
+
     return write_cells(writer, &row.key(), column_kind::regular_column, row.cells(), properties, has_complex_deletion);
 }
 
@@ -1503,11 +1555,12 @@ void writer::consume_end_of_stream() {
 
 std::unique_ptr<sstable_writer::writer_impl> make_writer(sstable& sst,
         const schema& s,
+        db::blobstore* blobstore,
         uint64_t estimated_partitions,
         const sstable_writer_config& cfg,
         encoding_stats enc_stats,
         shard_id shard) {
-    return std::make_unique<writer>(sst, s, estimated_partitions, cfg, enc_stats, shard);
+    return std::make_unique<writer>(sst, s, blobstore, estimated_partitions, cfg, enc_stats, shard);
 }
 
 }

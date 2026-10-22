@@ -43,6 +43,7 @@
 #include "tracing/trace_state.hh"
 #include "utils/updateable_value.hh"
 #include "dht/decorated_key.hh"
+#include "db/blobstore/blobstore.hh"
 
 #include <seastar/util/optimized_optional.hh>
 
@@ -114,6 +115,8 @@ struct sstable_writer_config {
     run_id run_identifier = run_id::create_random_id();
     size_t summary_byte_cost;
     sstring origin;
+
+    size_t object_payload_inline_threshold_when_flush;
 
 private:
     explicit sstable_writer_config() {}
@@ -297,12 +300,14 @@ public:
     mutation_source as_mutation_source();
 
     future<> write_components(mutation_reader mr,
+            db::blobstore* blobstore,
             uint64_t estimated_partitions,
             schema_ptr schema,
             const sstable_writer_config&,
             encoding_stats stats);
 
     sstable_writer get_writer(const schema& s,
+        db::blobstore* blobstore,
         uint64_t estimated_partitions,
         const sstable_writer_config&,
         encoding_stats enc_stats,

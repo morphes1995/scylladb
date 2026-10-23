@@ -30,36 +30,49 @@ db::blob::append(managed_bytes_view payload_view, size_t size){
 
     auto size_aligned = align_up(size, _alignment);
     auto padding = size_aligned - size;
-    blobstore::buffer_type buf = _bs->acquire_buffer(size_aligned, _alignment);
-    auto out = simple_memory_output_stream(buf.get_write(), buf.size());
+    blobstore::buffer_type buffers = _bs->acquire_buffer(size_aligned, _alignment);
+    auto out = buffers.get_ostream();
 
-    // todo : add crc and payload object meta info
+    // todo: add crc and payload object meta info
     for (bytes_view fragment : fragment_range(payload_view)) {
         out.write(reinterpret_cast<const char*>(fragment.data()), fragment.size());
     }
     out.fill(0, padding);
-    SCYLLA_ASSERT(out.size() == buf.size() - size_aligned);
+    SCYLLA_ASSERT(out.size() == buffers.size_bytes() - size_aligned);
+
+    std::vector<iovec> iovecs;
+    for(auto &buf: buffers){
+        iovecs.emplace_back(iovec{ const_cast<char *>(buf.get()), buf.size() });
+    }
 
     auto off = _file_pos;
     _file_pos += size_aligned;
     auto flush_pos_tmp = _file_pos;
-    auto p = buf.begin();
-    auto written = make_lw_shared<size_t>(0);
-
     // The write will be allowed to start now, but flush (below) must wait for not only this,
     // but all previous write/flush pairs.
-    co_await _pending_ops.run_with_ordered_post_op(off, [&]() -> future<> {
+    co_await _pending_ops.run_with_ordered_post_op(off, [&, frag_max_size = blobstore::default_max_fragment_size]() -> future<> {
+            uint64_t written = 0;
              for(;;){
                 try {
-                    auto bytes = co_await _f.dma_write(off + *written, p + *written, size_aligned - *written);
-                    *written += bytes;
-                    if (*written == size_aligned) {
+                    auto bytes = co_await _f.dma_write(off + written, iovecs);
+                    if (written + bytes == size_aligned) {
                         blogger.debug("payload fully written to {}", _desc.filename());
                         break;
                     }
-                    bytes = align_down(bytes, _alignment);
-                    off += bytes;
-                    blogger.debug("payload partial write of {} to {}: {}/{} bytes at at {}", bytes, _desc.filename(), size_aligned - *written, size_aligned, off - bytes);
+
+                    SCYLLA_ASSERT(bytes % _alignment == 0);
+                    // handle partially write
+                    auto c = bytes / frag_max_size;
+                    auto r = bytes % frag_max_size;
+                    // remove written iovec
+                    iovecs.erase(iovecs.begin(), iovecs.begin() + c);
+                    // update partially written iovec
+                    char* iov_base = reinterpret_cast<char*>(iovecs.front().iov_base);
+                    iovecs.front().iov_base = iov_base + r;
+                    iovecs.front().iov_len -= r;
+
+                    written += bytes;
+                    blogger.warn("payload partial write of {} to {} at {}, rest {}/{} bytes ", bytes, _desc.filename(),  off + written, size_aligned - written, size_aligned);
                     continue;
                 } catch (...) {
                     _lock.read_unlock();
@@ -67,7 +80,6 @@ db::blob::append(managed_bytes_view payload_view, size_t size){
                     throw;
                 }
             }
-            _bs->release_buffer(std::move(buf));
         }, [&]() -> future<> {
             co_await do_flush(flush_pos_tmp);
         });

@@ -149,7 +149,7 @@ future<db::blobstore::blob_ptr> db::blobstore::new_blob(){
     // reopen with o_dsync
     f = co_await open_file_dma(_cfg.blobstore_dir_location + "/" + d.filename(), open_flags::rw | open_flags::dsync);
     auto size =co_await f.size();
-    align = f.disk_overwrite_dma_alignment();
+    align = f.disk_write_dma_alignment();
 
     blob_ptr blob_p= make_shared<blob>(this, std::move(f), d, align, size);
     _blobs.emplace_back(blob_p);
@@ -176,35 +176,18 @@ db::blobstore::list_blobs(sstring &dirname) const {
 }
 
 db::blobstore::buffer_type db::blobstore::acquire_buffer(size_t s, size_t alignment) {
-    auto i = buffers.begin();
-    auto e = buffers.end();
+    s = align_up(s, alignment);
+    size_t tail_buffer_size = s % default_max_fragment_size;
+    auto fragment_count = s / default_max_fragment_size;
+    std::vector<temporary_buffer<char>> buffers;
+    buffers.reserve(fragment_count);
+    while (buffers.size() < fragment_count) {
+        buffers.emplace_back(temporary_buffer<char>::aligned(alignment, default_max_fragment_size));
+    }
+    if(tail_buffer_size){
+        buffers.emplace_back(temporary_buffer<char>::aligned(alignment, tail_buffer_size));
+    }
 
-    while (i != e) {
-        if (i->size() >= s) {
-            auto r = std::move(*i);
-            buffers.erase(i);
-            return r;
-        }
-        ++i;
-    }
-    auto a = ::memalign(alignment, s);
-    if (a == nullptr) {
-        throw std::bad_alloc();
-    }
     bslogger.debug("Allocated {} k buffer", s / 1024);
-    return buffer_type(reinterpret_cast<char *>(a), s, make_free_deleter(a));
-}
-
-void db::blobstore::release_buffer(buffer_type&& b) {
-    buffers.emplace_back(std::move(b));
-    std::sort(buffers.begin(), buffers.end(), [](const buffer_type& b1, const buffer_type& b2) {
-        return b1.size() < b2.size();
-    });
-
-    constexpr const size_t max_buffers = 8;
-
-    if (buffers.size() > max_buffers) {
-        bslogger.debug("Deleting {} buffers", buffers.size() - max_buffers);
-        buffers.erase(buffers.begin() + max_buffers, buffers.end());
-    }
+    return fragmented_temporary_buffer(std::move(buffers), s);
 }

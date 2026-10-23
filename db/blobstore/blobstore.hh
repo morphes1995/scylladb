@@ -50,7 +50,8 @@ class blob;
 class blobstore{
 public:
     using blob_ptr = ::shared_ptr<blob>;
-    using buffer_type = temporary_buffer<char>;
+    using buffer_type = fragmented_temporary_buffer;
+    static constexpr size_t default_max_fragment_size = 128 * 1024;
 
     blobstore_config _cfg;
     blobstore(blobstore_config &&cfg);
@@ -58,7 +59,6 @@ public:
 
     future<payload_pos> add_payload(managed_bytes_view payload_view, size_t size);
     buffer_type acquire_buffer(size_t s, size_t alignment);
-    void release_buffer(buffer_type&& b);
 
 private:
 

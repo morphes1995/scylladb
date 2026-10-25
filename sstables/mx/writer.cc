@@ -1204,7 +1204,6 @@ void writer::write_row_body(bytes_ostream& writer, const clustering_row& row, bo
             properties.local_deletion_time = row.marker().deletion_time();
         }
     }
-
     return write_cells(writer, &row.key(), column_kind::regular_column, row.cells(), properties, has_complex_deletion);
 }
 
@@ -1314,6 +1313,52 @@ stop_iteration writer::consume(clustering_row&& cr) {
     }
     ensure_tombstone_is_written();
     ensure_static_row_is_written_if_needed();
+
+
+    if(_blobstore != nullptr && _schema.is_s3_object_meta_table()){
+        const column_definition* inlined_cdef = _schema.get_column_definition(bytes("inlined"));
+        auto inlined_cell = cr.cells().cell_at(inlined_cdef->id).as_atomic_cell(*inlined_cdef);
+        if(data_value(false) == boolean_type->deserialize(managed_bytes_view(inlined_cell.value()))){
+            slogger.debug( "before flush object meta, payload is not inlined, skip ");
+            goto end;
+        }
+
+        const column_definition* payload_cdef = _schema.get_column_definition(bytes("payload"));
+        auto ts = cr.cells().cell_at(payload_cdef->id).as_atomic_cell(*payload_cdef).timestamp();
+        atomic_cell_view cv = cr.cells().cell_at(payload_cdef->id).as_atomic_cell(*payload_cdef);
+        slogger.debug( "before flush object meta, payload size: {}, threshold {}",cv.value_size(), _cfg.object_payload_inline_threshold_when_flush);
+        if(cv.value_size() <= _cfg.object_payload_inline_threshold_when_flush){
+            slogger.debug( "tiny payload ({} < {}) inlined into sstable data file", cv.value_size(), _cfg.object_payload_inline_threshold_when_flush);
+            goto end;
+        }
+
+        // save object payload to blobstore, and return the payload position info
+        std::exception_ptr ex;
+        db::payload_pos pos;
+        pos = _blobstore->add_payload(cv.value(), cv.value_size()).get();
+        slogger.debug(" payload flushed to blob {}, offset {}", pos.blob_id, pos.offset);
+
+        const column_definition* blob_id_cdef = _schema.get_column_definition(bytes("blob_id"));
+        const column_definition* offset_cdef = _schema.get_column_definition(bytes("offset"));
+        // remove payload cell and inlined cell from object meta
+        cr.cells().remove_if([&] (column_id id, atomic_cell_or_collection& c) {
+            if(id == payload_cdef->id){
+                return true;
+            }
+            if(id == inlined_cdef->id){
+                return true;
+            }
+            return false;
+        });
+
+        // update object data inlined status to false
+        cr.cells().apply(*inlined_cdef, atomic_cell::make_live(*(inlined_cdef->type), ts,  std::move(inlined_cdef->type->decompose(false))));
+        // add payload position info to object meta
+        cr.cells().apply(*blob_id_cdef, atomic_cell::make_live(*(blob_id_cdef->type), ts,  std::move(blob_id_cdef->type->decompose(int64_t(pos.blob_id)))));
+        cr.cells().apply(*offset_cdef, atomic_cell::make_live(*(offset_cdef->type), ts,  std::move(offset_cdef->type->decompose(int64_t(pos.offset)))));
+    }
+
+end:
     write_clustered(cr);
 
     auto can_split_partition_at_clustering_boundary = [this] {

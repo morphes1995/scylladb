@@ -328,7 +328,7 @@ const std::vector<sstables::shared_sstable> load_sstables(schema_ptr schema, sst
         auto ed = sstables::parse_path(sst_path, schema->ks_name(), schema->cf_name());
         const auto dir_path = sst_path.parent_path();
         data_dictionary::storage_options local;
-        auto sst = sst_man.make_sstable(schema, dir_path.c_str(), local, ed.generation, sstables::sstable_state::normal, ed.version, ed.format);
+        auto sst = sst_man.make_sstable(schema, nullptr, dir_path.c_str(), local, ed.generation, sstables::sstable_state::normal, ed.version, ed.format);
 
         try {
             co_await sst->load(schema->get_sharder(), sstables::sstable_open_config{.load_first_and_last_position_metadata = false});
@@ -891,7 +891,7 @@ private:
             throw std::runtime_error(fmt::format("cannot create output sstable {}, file already exists", sst_name));
         }
         data_dictionary::storage_options local;
-        return _sst_man.make_sstable(_schema, _output_dir, local, generation, sstables::sstable_state::normal, version, format);
+        return _sst_man.make_sstable(_schema, nullptr, _output_dir, local, generation, sstables::sstable_state::normal, version, format);
     }
     sstables::sstable_writer_config do_configure_writer(sstring origin) const {
         return _sst_man.configure_writer(std::move(origin));
@@ -2574,7 +2574,7 @@ void write_operation(schema_ptr schema, reader_permit permit, const std::vector<
     auto writer_cfg = manager.configure_writer("scylla-sstable");
     writer_cfg.validation_level = validation_level;
     data_dictionary::storage_options local;
-    auto sst = manager.make_sstable(schema, output_dir, local, generation, sstables::sstable_state::normal, version, format);
+    auto sst = manager.make_sstable(schema, nullptr, output_dir, local, generation, sstables::sstable_state::normal, version, format);
 
     sst->write_components(std::move(reader), 1, schema, writer_cfg, encoding_stats{}).get();
 }
@@ -2636,6 +2636,7 @@ void shard_of_with_vnodes(const std::vector<sstables::shared_sstable>& sstables,
             shard_count, ignore_msb_bits).build();
         auto new_sst = sstable_manager.make_sstable(
             schema,
+            nullptr,
             sst->get_storage().prefix(),
             data_dictionary::storage_options{},
             sst->generation(),

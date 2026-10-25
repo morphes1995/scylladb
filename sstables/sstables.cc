@@ -3219,6 +3219,7 @@ mutation_source sstable::as_mutation_source() {
 }
 
 sstable::sstable(schema_ptr schema,
+        db::blobstore* blobstore,
         sstring table_dir,
         const data_dictionary::storage_options& storage,
         generation_type generation,
@@ -3232,6 +3233,7 @@ sstable::sstable(schema_ptr schema,
         size_t buffer_size)
     : sstable_buffer_size(buffer_size)
     , _schema(std::move(schema))
+    , _blobstore(blobstore)
     , _generation(generation)
     , _state(state)
     , _storage(make_storage(manager, storage, std::move(table_dir), _state))

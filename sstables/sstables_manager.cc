@@ -122,7 +122,7 @@ bool sstables_manager::uuid_sstable_identifiers() const {
     return _features.uuid_sstable_identifiers;
 }
 
-shared_sstable sstables_manager::make_sstable(schema_ptr schema,
+shared_sstable sstables_manager::make_sstable(schema_ptr schema, db::blobstore* blobstore,
         sstring table_dir,
         const data_dictionary::storage_options& storage,
         generation_type generation,
@@ -132,7 +132,7 @@ shared_sstable sstables_manager::make_sstable(schema_ptr schema,
         gc_clock::time_point now,
         io_error_handler_gen error_handler_gen,
         size_t buffer_size) {
-    return make_lw_shared<sstable>(std::move(schema), std::move(table_dir), storage, generation, state, v, f, get_large_data_handler(), *this, now, std::move(error_handler_gen), buffer_size);
+    return make_lw_shared<sstable>(std::move(schema), blobstore, std::move(table_dir), storage, generation, state, v, f, get_large_data_handler(), *this, now, std::move(error_handler_gen), buffer_size);
 }
 
 sstable_writer_config sstables_manager::configure_writer(sstring origin) const {
@@ -149,6 +149,8 @@ sstable_writer_config sstables_manager::configure_writer(sstring origin) const {
     cfg.summary_byte_cost = summary_byte_cost(_db_config.sstable_summary_ratio());
 
     cfg.origin = std::move(origin);
+
+    cfg.object_payload_inline_threshold_when_flush = _db_config.object_payload_inline_threshold_when_flush();
 
     return cfg;
 }

@@ -43,6 +43,7 @@
 #include "tracing/trace_state.hh"
 #include "utils/updateable_value.hh"
 #include "dht/decorated_key.hh"
+#include "db/blobstore/blobstore.hh"
 
 #include <seastar/util/optimized_optional.hh>
 
@@ -114,6 +115,8 @@ struct sstable_writer_config {
     run_id run_identifier = run_id::create_random_id();
     size_t summary_byte_cost;
     sstring origin;
+
+    size_t object_payload_inline_threshold_when_flush;
 
 private:
     explicit sstable_writer_config() {}
@@ -194,6 +197,7 @@ public:
     using integrity_check = bool_class<class integrity_check_tag>;
 public:
     sstable(schema_ptr schema,
+            db::blobstore* blobstore,
             sstring table_dir,
             const data_dictionary::storage_options& storage,
             generation_type generation,
@@ -557,6 +561,7 @@ private:
     lw_shared_ptr<file_input_stream_history> _index_history = make_lw_shared<file_input_stream_history>();
 
     schema_ptr _schema;
+    db::blobstore* _blobstore;
     generation_type _generation{0};
     sstable_state _state;
 
@@ -609,6 +614,8 @@ public:
     bool has_component(component_type f) const;
     sstables_manager& manager() { return _manager; }
     const sstables_manager& manager() const { return _manager; }
+
+    db::blobstore* blobstore() {return _blobstore; }
 
     static future<std::vector<sstring>> read_and_parse_toc(file f);
 private:

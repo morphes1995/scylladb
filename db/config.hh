@@ -426,6 +426,7 @@ public:
 
     named_value<uint32_t> blob_size_mb;
     named_value<uint32_t> object_payload_inline_threshold;
+    named_value<uint32_t> object_payload_inline_threshold_when_flush;
 
     named_value<bool> sanitizer_report_backtrace;
     named_value<bool> flush_schema_tables_after_modification;

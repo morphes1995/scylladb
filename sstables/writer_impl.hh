@@ -20,6 +20,7 @@ namespace sstables {
 struct sstable_writer::writer_impl {
     sstable& _sst;
     const schema& _schema;
+    db::blobstore* _blobstore;
     const sstable_writer_config _cfg;
     // NOTE: _collector and _c_stats are used to generation of statistics file
     // when writing a new sstable.
@@ -30,6 +31,7 @@ struct sstable_writer::writer_impl {
     writer_impl(sstable& sst, const schema& schema, const sstable_writer_config& cfg)
         : _sst(sst)
         , _schema(schema)
+        , _blobstore(sst.blobstore())
         , _cfg(cfg)
         , _collector(_schema, sst.get_filename(), sst.manager().get_local_host_id())
         , _validator(format("sstable writer {}", _sst.get_filename()), _schema, _cfg.validation_level)

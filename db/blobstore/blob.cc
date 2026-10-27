@@ -10,12 +10,12 @@ bool db::blob::is_still_writing(size_t size){
 
     // todo payload entry overhead ?
 
-    if(_file_pos + size == _size){
+    if(_file_pos + size == _max_size){
         set_sealed();
         return true;
     }
 
-    if(_file_pos + size > _size){
+    if(_file_pos + size > _max_size){
         set_sealed();
         return false;
     }
@@ -24,7 +24,10 @@ bool db::blob::is_still_writing(size_t size){
 }
 
 future<db::payload_pos>
-db::blob::append(managed_bytes_view payload_view, size_t size){
+db::blob::append(managed_bytes_view payload_view, size_t size, bool need_flush){
+
+    SCYLLA_ASSERT(need_flush == _desc.sync_write());
+
     payload_pos pos(_desc.id(), _file_pos);
     blogger.debug("writing to {}:{}", _desc.filename(), _file_pos);
 
@@ -47,6 +50,10 @@ db::blob::append(managed_bytes_view payload_view, size_t size){
 
     auto off = _file_pos;
     _file_pos += size_aligned;
+    if(!need_flush &&  _file_pos >= _max_size ){
+        // force flush when blob file is full
+        need_flush = true;
+    }
     auto flush_pos_tmp = _file_pos;
     // The write will be allowed to start now, but flush (below) must wait for not only this,
     // but all previous write/flush pairs.
@@ -81,14 +88,16 @@ db::blob::append(managed_bytes_view payload_view, size_t size){
                 }
             }
         }, [&]() -> future<> {
-            co_await do_flush(flush_pos_tmp);
+            if(need_flush){
+                co_await do_flush(flush_pos_tmp);
+            }
         });
 
     co_return pos;
 }
 
-future<> db::blob::do_flush(uint64_t pos) {
-    if (pos <= _flush_pos) {
+future<> db::blob::do_flush(uint64_t pos, bool force) {
+    if (!force && pos <= _flush_pos) {
         blogger.debug("blob {} already flushed! ({} <= {})", _desc.filename(), pos, _flush_pos);
         co_return;
     }
@@ -101,4 +110,8 @@ future<> db::blob::do_flush(uint64_t pos) {
         blogger.error("Failed to flush blob {} to disk: {}", _desc.filename(), std::current_exception());
         throw;
     }
+}
+
+future<> db::blob::flush() {
+    return do_flush(_file_pos, true);
 }

@@ -1951,7 +1951,7 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::tra
                 // save object payload to blobstore, and return the payload position info
                 std::exception_ptr ex;
                 payload_pos pos;
-                auto f_pos = co_await coroutine::as_future(cf.blobstore()->add_payload(cv.value(), cv.value_size()));
+                auto f_pos = co_await coroutine::as_future(cf.blobstore()->add_payload_sync(cv.value(), cv.value_size()));
                 if (!f_pos.failed()) {
                     pos = f_pos.get();
                 } else {

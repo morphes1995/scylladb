@@ -1326,7 +1326,7 @@ stop_iteration writer::consume(clustering_row&& cr) {
         const column_definition* payload_cdef = _schema.get_column_definition(bytes("payload"));
         auto ts = cr.cells().cell_at(payload_cdef->id).as_atomic_cell(*payload_cdef).timestamp();
         atomic_cell_view cv = cr.cells().cell_at(payload_cdef->id).as_atomic_cell(*payload_cdef);
-        slogger.debug( "before flush object meta, payload size: {}, threshold {}",cv.value_size(), _cfg.object_payload_inline_threshold_when_flush);
+        slogger.debug( "before flush object meta, cf: {}  payload size: {}, threshold {}",_schema.cf_name(), cv.value_size(), _cfg.object_payload_inline_threshold_when_flush);
         if(cv.value_size() <= _cfg.object_payload_inline_threshold_when_flush){
             slogger.debug( "tiny payload ({} < {}) inlined into sstable data file", cv.value_size(), _cfg.object_payload_inline_threshold_when_flush);
             goto end;
@@ -1523,6 +1523,9 @@ void writer::consume_end_of_stream() {
         _sst._schema->get_partitioner().name(), _sst._schema->bloom_filter_fp_chance(),
         _sst._schema, _sst.get_first_decorated_key(), _sst.get_last_decorated_key(), _enc_stats);
     close_data_writer();
+    if(_blobstore && _schema.is_s3_object_meta_table()){
+        _blobstore->flush().get(); // make sure all payload persist on blobstore
+    }
     _sst.write_summary();
     _sst.maybe_rebuild_filter_from_index(_num_partitions_consumed);
     _sst.write_filter();

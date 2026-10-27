@@ -29,15 +29,21 @@ struct blobstore_config{
 struct blob_descriptor{
     private:
         blob_id_type _id;
+        // use O_DSYNC or not
+        // extract payload when flush, we add the payload to blob file opening without O_DSYNC
+        // extract payload before write CL, we add the payload to blob file opening with O_DSYNC
+        bool _sync_write;
     public:
         static const std::string SEPARATOR;
         static const std::string FILENAME_PREFIX;
         static const std::string SUFFIX;
+        static const std::string SYNC_SUFFIX;
 
-        blob_descriptor(const blob_id_type  id): _id(id) {};
+        blob_descriptor(const blob_id_type  id, bool sync_write): _id(id), _sync_write(sync_write){};
         blob_descriptor(const std::string& filename);
         sstring filename() const;
         blob_id_type id(){ return _id; };
+        bool sync_write(){ return _sync_write; };
 };
 
 
@@ -57,13 +63,20 @@ public:
     blobstore(blobstore_config &&cfg);
     future<> init();
 
+    // append payload to blob persistently
+    future<payload_pos> add_payload_sync(managed_bytes_view payload_view, size_t size);
+    // append payload to blob, and user must call flush after payload data added to blobstore
     future<payload_pos> add_payload(managed_bytes_view payload_view, size_t size);
+    future<> flush();
+
     buffer_type acquire_buffer(size_t s, size_t alignment);
 
 private:
 
     blob_id_type blob_id =0;
-    std::vector<blob_ptr> _blobs;
+
+    std::vector<blob_ptr> _blobs; // blob file without o_dsync
+    std::vector<blob_ptr> _sync_write_blobs;// blob file with o_dsync
     semaphore _blob_create_semaphore;
 
     std::vector<buffer_type> buffers;
@@ -74,8 +87,10 @@ private:
     blob_id_type next_blob_id(){
         return ++ blob_id;
     }
-    future<blob_ptr> new_blob();
+
+    future<blob_ptr> new_blob(bool sync_write);
     future<blob_ptr> writing_blob(size_t size);
+    future<blob_ptr> writing_sync_write_blob(size_t size);
     future<std::vector<blob_descriptor>> list_blobs(sstring &dirname) const;
 };
 
@@ -86,16 +101,16 @@ private:
  */
 class blob : public enable_shared_from_this<blob>{
 public:
-    blob(blobstore *bs, file&& f, const blob_descriptor& d, size_t align, size_t size, size_t file_pos = 0):
+    blob(blobstore *bs, file&& f, const blob_descriptor& d, size_t align, size_t max_size, size_t file_pos = 0):
          _bs(bs)
          , _f(f)
          , _desc(d)
          , _alignment(align)
-         , _size(size)
+         , _max_size(max_size)
          , _file_pos(file_pos)
          , _pending_ops(true)
     {
-        if (_file_pos >= _size){
+        if (_file_pos >= max_size){
             _closed = true;
         }
     }
@@ -107,15 +122,17 @@ public:
     void set_sealed() {
         _closed = true;
     };
-    future<payload_pos> append(managed_bytes_view payload_view, size_t size);
 
+    future<payload_pos> append(managed_bytes_view payload_view, size_t size, bool need_flush);
+    future<> flush();
+    bool sync_write() { return _desc.sync_write(); };
 
 private:
     blobstore *_bs;
     file _f;
     blob_descriptor _desc;
     size_t _alignment;
-    [[maybe_unused]] size_t _size;
+    size_t _max_size;
 
     uint64_t _file_pos = 0;
     uint64_t _flush_pos = 0;
@@ -123,8 +140,7 @@ private:
 
     rwlock _lock; // used as a barrier between write & flush
     bool _closed = false;
-
-    future<> do_flush(uint64_t pos);
+    future<> do_flush(uint64_t pos, bool force = false);
 };
 
 }

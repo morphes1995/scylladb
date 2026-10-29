@@ -68,8 +68,9 @@ public:
     // append payload to blob, and user must call flush after payload data added to blobstore
     future<payload_pos> add_payload(managed_bytes_view payload_view, size_t size);
     future<> flush();
-
     buffer_type acquire_buffer(size_t s, size_t alignment);
+
+    future<fragmented_temporary_buffer> read_payload(blob_id_type blob_id, blob_offset_type offset, int64_t size);
 
 private:
 

@@ -273,6 +273,7 @@ public:
                 return handle_result(_consumer.consume(std::move(sr)));
             }
             future<stop_iteration> consume(clustering_row&& cr) {
+                // todo
                 return handle_result(_consumer.consume(std::move(cr)));
             }
             future<stop_iteration> consume(range_tombstone_change&& rt) {

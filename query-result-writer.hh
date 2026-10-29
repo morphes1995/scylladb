@@ -17,6 +17,7 @@
 #include "mutation/tombstone.hh"
 #include "idl/query.dist.hh"
 #include "idl/query.dist.impl.hh"
+#include "db/blobstore/blobstore.hh"
 
 namespace query {
 
@@ -207,12 +208,14 @@ class mutation_querier {
     bool _live_data_in_static_row{};
     uint64_t _live_clustering_rows = 0;
     std::optional<ser::qr_partition__rows<bytes_ostream>> _rows_wr;
+
+    db::blobstore* _bs;
 private:
     void query_static_row(const row& r, tombstone current_tombstone);
     void prepare_writers();
 public:
     mutation_querier(const schema& s, query::result::partition_writer pw,
-                     query::result_memory_accounter& memory_accounter);
+                     query::result_memory_accounter& memory_accounter, db::blobstore *bs);
     void consume(tombstone) { }
     // Requires that sr.has_any_live_data()
     stop_iteration consume(static_row&& sr, tombstone current_tombstone);
@@ -225,11 +228,13 @@ public:
 class query_result_builder {
     const schema& _schema;
     query::result::builder& _rb;
+    db::blobstore *_bs;
     std::optional<mutation_querier> _mutation_consumer;
     // We need to remember that we requested stop, to mark the read as short in the end.
     stop_iteration _stop;
 public:
     query_result_builder(const schema& s, query::result::builder& rb) noexcept;
+    query_result_builder(const schema& s, query::result::builder& rb, db::blobstore *bs) noexcept;
 
     void consume_new_partition(const dht::decorated_key& dk);
     void consume(tombstone t);

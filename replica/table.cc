@@ -3280,7 +3280,7 @@ table::query(schema_ptr query_schema,
 
         std::exception_ptr ex;
       try {
-        co_await q.consume_page(query_result_builder(*query_schema, qs.builder), qs.remaining_rows(), qs.remaining_partitions(), qs.cmd.timestamp, trace_state);
+        co_await q.consume_page(query_result_builder(*query_schema, qs.builder, blobstore()), qs.remaining_rows(), qs.remaining_partitions(), qs.cmd.timestamp, trace_state);
       } catch (...) {
         ex = std::current_exception();
       }

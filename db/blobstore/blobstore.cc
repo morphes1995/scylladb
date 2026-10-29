@@ -135,6 +135,16 @@ db::blobstore::flush(){
     co_await b->flush();
 }
 
+
+future<fragmented_temporary_buffer>
+db::blobstore::read_payload(blob_id_type blob_id, blob_offset_type offset, int64_t size){
+
+
+
+    return make_ready_future<fragmented_temporary_buffer>();
+}
+
+
 future<db::blobstore::blob_ptr> db::blobstore::writing_blob(size_t size) {
     if (_blobs.empty() || !_blobs.back()->is_still_writing(size)) {
         return _blob_create_semaphore.wait().then([this, size]() {

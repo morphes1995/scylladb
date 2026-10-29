@@ -1873,11 +1873,12 @@ mutation_partition::upgrade(const schema& old_schema, const schema& new_schema) 
 }
 
 mutation_querier::mutation_querier(const schema& s, query::result::partition_writer pw,
-                                   query::result_memory_accounter& memory_accounter)
+                                   query::result_memory_accounter& memory_accounter, db::blobstore* bs)
     : _schema(s)
     , _memory_accounter(memory_accounter)
     , _pw(std::move(pw))
     , _static_cells_wr(pw.start().start_static_row().start_cells())
+    , _bs(bs)
 {
 }
 
@@ -1925,6 +1926,50 @@ void mutation_querier::prepare_writers() {
 
 stop_iteration mutation_querier::consume(clustering_row&& cr, row_tombstone current_tombstone) {
     prepare_writers();
+
+    if(_schema.is_s3_object_meta_table() && _bs){
+        const column_definition* inlined_cdef = _schema.get_column_definition(bytes("inlined"));
+        auto inlined_cell = cr.cells().cell_at(inlined_cdef->id).as_atomic_cell(*inlined_cdef);
+        if(data_value(true) == boolean_type->deserialize(managed_bytes_view(inlined_cell.value()))){
+            goto end;
+        }
+
+        const column_definition* blob_id_cdef = _schema.get_column_definition(bytes("blob_id"));
+        auto blob_id_cell = cr.cells().cell_at(blob_id_cdef->id).as_atomic_cell(*blob_id_cdef);
+        int64_t blob_id = value_cast<int64_t>(long_type->deserialize(managed_bytes_view(blob_id_cell.value())));
+
+        const column_definition* offset_cdef = _schema.get_column_definition(bytes("offset"));
+        auto offset_cell = cr.cells().cell_at(offset_cdef->id).as_atomic_cell(*offset_cdef);
+        int64_t offset = value_cast<int64_t>(long_type->deserialize(managed_bytes_view(offset_cell.value())));
+
+        const column_definition* size_cdef = _schema.get_column_definition(bytes("size"));
+        auto size_cell = cr.cells().cell_at(size_cdef->id).as_atomic_cell(*size_cdef);
+        int32_t size = value_cast<int32_t>(int32_type->deserialize(managed_bytes_view(size_cell.value())));
+
+
+        mplog.info("mutation_querier, read payload from blob {}, offset {} , size {}", blob_id, offset, size);
+
+        // todo this function cannot be a coroutine, this may not be a good place to read payload
+        auto payload_fragmented_buffer  = co_await _bs->read_payload(blob_id, offset, size);
+
+        const column_definition* payload_cdef = _schema.get_column_definition(bytes("payload"));
+        auto ts = cr.cells().cell_at(payload_cdef->id).as_atomic_cell(*payload_cdef).timestamp();
+         cr.cells().remove_if([&] (column_id id, atomic_cell_or_collection& c) {
+            if(id == payload_cdef->id){
+                return true;
+            }
+            if(id == inlined_cdef->id){
+                return true;
+            }
+            return false;
+        });
+
+        // update object data inlined status to true
+        cr.cells().apply(*inlined_cdef, atomic_cell::make_live(*(inlined_cdef->type), ts,  std::move(inlined_cdef->type->decompose(true))));
+        // add payload cell
+        cr.cells().apply(*payload_cdef, atomic_cell::make_live(*(payload_cdef->type), ts, fragmented_temporary_buffer::view(payload_fragmented_buffer)));
+    }
+    end:
 
     const query::partition_slice& slice = _pw.slice();
 
@@ -1993,8 +2038,12 @@ query_result_builder::query_result_builder(const schema& s, query::result::build
     : _schema(s), _rb(rb)
 { }
 
+query_result_builder::query_result_builder(const schema& s, query::result::builder& rb, db::blobstore *bs) noexcept
+    : _schema(s), _rb(rb), _bs(bs)
+{ }
+
 void query_result_builder::consume_new_partition(const dht::decorated_key& dk) {
-    _mutation_consumer.emplace(mutation_querier(_schema, _rb.add_partition(_schema, dk.key()), _rb.memory_accounter()));
+    _mutation_consumer.emplace(mutation_querier(_schema, _rb.add_partition(_schema, dk.key()), _rb.memory_accounter(), _bs));
 }
 
 void query_result_builder::consume(tombstone t) {

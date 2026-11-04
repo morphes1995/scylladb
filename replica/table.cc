@@ -254,7 +254,19 @@ table::make_reader_v2(schema_ptr s,
         readers.emplace_back(make_sstable_reader(s, permit, _sstables, range, slice, std::move(trace_state), fwd, fwd_mr));
     }
 
-    auto rd = make_combined_reader(s, permit, std::move(readers), fwd, fwd_mr);
+    bool ignore_payload = true;
+    if(s->is_s3_object_meta_table()){
+        const column_definition* payload_cdef = s->get_column_definition(bytes("payload"));
+        for(auto column_id : slice.regular_columns){
+            if(payload_cdef->id == column_id){
+                ignore_payload = false;
+                tlogger.debug("make_combined_reader, slice contains payload column, id {}", column_id);
+            }
+        }
+    }
+
+    auto rd = make_combined_reader(s, permit, std::move(readers), fwd, fwd_mr, blobstore(),
+                                   ignore_payload ? payload_action::ignore : payload_action::need_inline);
 
     if (_config.data_listeners && !_config.data_listeners->empty()) {
         rd = _config.data_listeners->on_read(s, range, slice, std::move(rd));

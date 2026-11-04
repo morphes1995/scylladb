@@ -268,8 +268,9 @@ public:
     merging_reader(schema_ptr schema,
             reader_permit permit,
             streamed_mutation::forwarding fwd_sm,
-            Producer&& producer)
-        : impl(std::move(schema), std::move(permit))
+            Producer&& producer,
+            db::blobstore* bs = nullptr, payload_action pa = payload_action::ignore)
+        : impl(std::move(schema), std::move(permit), bs, pa)
         , _merger(_schema, _permit, std::move(producer))
         , _fwd_sm(fwd_sm) {}
 
@@ -624,19 +625,30 @@ future<> mutation_reader_merger::close() noexcept {
 
 template <FragmentProducer P>
 future<> merging_reader<P>::fill_buffer() {
-    return repeat([this] {
-        return _merger().then([this] (mutation_fragment_v2_opt mfo) {
-            if (!mfo) {
-                _end_of_stream = true;
-                return stop_iteration::yes;
-            }
-            push_mutation_fragment(std::move(*mfo));
-            if (is_buffer_full()) {
-                return stop_iteration::yes;
-            }
-            return stop_iteration::no;
-        });
-    });
+    for(;;){
+        auto mfo = co_await _merger();
+        if (!mfo) {
+            _end_of_stream = true;
+            co_return;
+        }
+
+        if(_schema->is_s3_object_meta_table()
+           && _bs
+           && mfo->is_clustering_row()
+           && _pa == payload_action::need_inline){
+            clustering_row& cr = const_cast<clustering_row&>(mfo->as_clustering_row());
+            co_await _bs->read_payload(*_schema, cr.cells());
+            // reconstructor the mfo because the memory usage is updated
+            push_mutation_fragment(mutation_fragment_v2(*_schema, _permit, std::move(cr)));
+            mrlog.debug("fill buffer, curr buffer_size {}, max_buffer_size_in_bytes {}, prefetch is disabled" , buffer_size(), max_buffer_size_in_bytes);
+            co_return; // if we need read blob, forbidden the prefetch
+        }
+
+        push_mutation_fragment(std::move(*mfo));
+        if (is_buffer_full()) {
+            co_return;
+        }
+    }
 }
 
 template <FragmentProducer P>
@@ -683,29 +695,36 @@ mutation_reader make_combined_reader(schema_ptr schema,
         reader_permit permit,
         std::unique_ptr<reader_selector> selector,
         streamed_mutation::forwarding fwd_sm,
-        mutation_reader::forwarding fwd_mr) {
+        mutation_reader::forwarding fwd_mr,
+        db::blobstore* bs, payload_action pa) {
     return make_mutation_reader<merging_reader<mutation_reader_merger>>(schema,
             std::move(permit),
             fwd_sm,
-            mutation_reader_merger(schema, std::move(selector), fwd_sm, fwd_mr));
+            mutation_reader_merger(schema, std::move(selector), fwd_sm, fwd_mr),
+            bs, pa);
 }
 
 mutation_reader make_combined_reader(schema_ptr schema,
         reader_permit permit,
         std::vector<mutation_reader> readers,
         streamed_mutation::forwarding fwd_sm,
-        mutation_reader::forwarding fwd_mr) {
+        mutation_reader::forwarding fwd_mr,
+        db::blobstore* bs, payload_action pa) {
+
     if (readers.empty()) {
         return make_empty_flat_reader_v2(std::move(schema), std::move(permit));
     }
-    if (readers.size() == 1) {
+    if (readers.size() == 1 && !schema->is_s3_object_meta_table()) {
+        readers.front().set_blobstore(bs);
+        readers.front().set_payload_action(pa);
         return std::move(readers.front());
     }
     return make_combined_reader(schema,
             std::move(permit),
             std::make_unique<list_reader_selector>(schema, std::move(readers)),
             fwd_sm,
-            fwd_mr);
+            fwd_mr,
+            bs, pa);
 }
 
 mutation_reader make_combined_reader(schema_ptr schema,

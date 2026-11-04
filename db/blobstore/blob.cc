@@ -115,3 +115,41 @@ future<> db::blob::do_flush(uint64_t pos, bool force) {
 future<> db::blob::flush() {
     return do_flush(_file_pos, true);
 }
+
+future<fragmented_temporary_buffer>
+db::blob::read(blob_offset_type offset, size_t size){
+    blogger.debug("read payload, id {}, offset {}, size {}", blob_id(), offset, size);
+
+    auto size_aligned = align_up(size, _alignment);
+    auto padding = size_aligned - size;
+    blobstore::buffer_type buffers = _bs->acquire_buffer(size_aligned, _alignment);
+
+    std::vector<iovec> iovecs;
+    for(auto &buf: buffers){
+        iovecs.emplace_back(iovec{ const_cast<char *>(buf.get()), buf.size() });
+    }
+
+    uint64_t total_read_bytes = 0;
+    for(;;){
+        try {
+            auto read_bytes = co_await _f.dma_read(offset + total_read_bytes, iovecs);
+            if (total_read_bytes + read_bytes == size_aligned) {
+                blogger.debug("payload fully read from {}, size {}, padding {}", _desc.filename(), size_aligned, padding);
+                break;
+            }
+
+            SCYLLA_ASSERT(read_bytes % _alignment == 0);
+            // handle partially write
+            iovecs.erase(iovecs.begin(), iovecs.begin() + read_bytes / blobstore::default_max_fragment_size);
+            total_read_bytes += read_bytes;
+
+            continue;
+        } catch (...) {
+            blogger.error("Failed to read payload to blob for {}: {}", _desc.filename(), std::current_exception());
+            throw;
+        }
+    }
+
+    buffers.remove_suffix(padding); // remove unnecessary data in the tail
+    co_return buffers;
+}

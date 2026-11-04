@@ -41,12 +41,14 @@ mutation_reader make_combined_reader(schema_ptr schema,
         reader_permit permit,
         std::vector<mutation_reader>,
         streamed_mutation::forwarding fwd_sm = streamed_mutation::forwarding::no,
-        mutation_reader::forwarding fwd_mr = mutation_reader::forwarding::yes);
+        mutation_reader::forwarding fwd_mr = mutation_reader::forwarding::yes,
+        db::blobstore* bs = nullptr, payload_action pa = payload_action::ignore);
 mutation_reader make_combined_reader(schema_ptr schema,
         reader_permit permit,
         std::unique_ptr<reader_selector>,
         streamed_mutation::forwarding,
-        mutation_reader::forwarding);
+        mutation_reader::forwarding,
+        db::blobstore* bs = nullptr, payload_action pa = payload_action::ignore);
 mutation_reader make_combined_reader(schema_ptr schema,
         reader_permit permit,
         mutation_reader&& a,

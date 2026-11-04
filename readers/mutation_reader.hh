@@ -18,7 +18,19 @@
 #include "mutation/mutation_consumer_concepts.hh"
 #include "reader_permit.hh"
 
+#include "db/blobstore/blobstore.hh"
+
+extern logging::logger mrlog;
+
 using seastar::future;
+
+
+enum class payload_action {
+    need_extract = 1,
+    need_inline = 2,
+    ignore = 4,
+};
+
 
 /// \brief Represents a stream of mutation fragments.
 ///
@@ -140,6 +152,12 @@ public:
 
         schema_ptr _schema;
         reader_permit _permit;
+
+        db::blobstore *_bs = nullptr;
+        // when flush memtable, we need extract payload from object meta
+        // when execute query, we need read payload from blobstore and inline to object meta
+        payload_action _pa = payload_action::ignore;
+
         friend class mutation_reader;
     protected:
         template<typename... Args>
@@ -164,6 +182,13 @@ public:
 
     public:
         impl(schema_ptr s, reader_permit permit) : _buffer(permit), _schema(std::move(s)), _permit(std::move(permit)) { }
+        impl(schema_ptr s, reader_permit permit, db::blobstore* bs, payload_action pa)
+            : _buffer(permit)
+            , _schema(std::move(s))
+            , _permit(std::move(permit))
+            , _bs(bs)
+            , _pa(pa)
+            { }
         virtual ~impl() {}
         virtual future<> fill_buffer() = 0;
         virtual future<> next_partition() = 0;
@@ -264,8 +289,7 @@ public:
             Consumer _consumer;
             consumer_adapter(mutation_reader::impl& reader, Consumer c)
                     : _reader(reader)
-                    , _consumer(std::move(c))
-            { }
+                    , _consumer(std::move(c)){ }
             future<stop_iteration> operator()(mutation_fragment_v2&& mf) {
                 return std::move(mf).consume(*this);
             }
@@ -579,6 +603,8 @@ public:
     mutation_fragment_v2 pop_mutation_fragment() { return _impl->pop_mutation_fragment(); }
     void unpop_mutation_fragment(mutation_fragment_v2 mf) { _impl->unpop_mutation_fragment(std::move(mf)); }
     const schema_ptr& schema() const { return _impl->_schema; }
+    void set_payload_action(enum payload_action pa) { _impl->_pa = pa; }
+    void set_blobstore(db::blobstore* bs) { _impl->_bs = bs; }
     const reader_permit& permit() const { return _impl->_permit; }
     reader_permit& permit() { return _impl->_permit; }
     db::timeout_clock::time_point timeout() const noexcept { return _impl->timeout(); }

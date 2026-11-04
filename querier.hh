@@ -90,8 +90,7 @@ public:
         , _slice(std::make_unique<const query::partition_slice>(std::move(slice)))
         , _reader(ms.make_reader_v2(_schema, _permit, *_range, *_slice, std::move(trace_ptr), streamed_mutation::forwarding::no, mutation_reader::forwarding::no))
         , _query_ranges(*_range)
-        , _qr_config(std::move(config))
-    { }
+        , _qr_config(std::move(config)){ }
 
     querier_base(querier_base&&) = default;
     querier_base& operator=(querier_base&&) = default;

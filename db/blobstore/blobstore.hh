@@ -6,6 +6,7 @@
 #include <seastar/core/rwlock.hh>
 #include "db/config.hh"
 #include "utils/flush_queue.hh"
+#include "mutation/mutation_fragment.hh"
 
 using namespace seastar;
 
@@ -63,20 +64,17 @@ public:
     blobstore(blobstore_config &&cfg);
     future<> init();
 
-    // append payload to blob persistently
-    future<payload_pos> add_payload_sync(managed_bytes_view payload_view, size_t size);
-    // append payload to blob, and user must call flush after payload data added to blobstore
-    future<payload_pos> add_payload(managed_bytes_view payload_view, size_t size);
-    future<> flush();
-
     buffer_type acquire_buffer(size_t s, size_t alignment);
-
+    // return whether payload extract to blobstore or not
+    future<std::optional<bool>> add_payload(const schema& schema, row& row, size_t object_payload_inline_threshold, bool sync);
+    future<> read_payload(const schema& schema, row& row);
+    future<> flush();
 private:
 
     blob_id_type blob_id =0;
 
-    std::vector<blob_ptr> _blobs; // blob file without o_dsync
-    std::vector<blob_ptr> _sync_write_blobs;// blob file with o_dsync
+    std::map<blob_id_type, blob_ptr> _blobs; // blob file without o_dsync
+    std::map<blob_id_type, blob_ptr> _sync_write_blobs; // blob file with o_dsync
     semaphore _blob_create_semaphore;
 
     std::vector<buffer_type> buffers;
@@ -92,6 +90,10 @@ private:
     future<blob_ptr> writing_blob(size_t size);
     future<blob_ptr> writing_sync_write_blob(size_t size);
     future<std::vector<blob_descriptor>> list_blobs(sstring &dirname) const;
+
+    // append payload to blob persistently
+    future<payload_pos> append_payload(managed_bytes_view payload_view, size_t size, bool sync);
+    future<fragmented_temporary_buffer> read_payload(blob_id_type blob_id, blob_offset_type offset, int64_t size);
 };
 
 
@@ -123,9 +125,10 @@ public:
         _closed = true;
     };
 
-    future<payload_pos> append(managed_bytes_view payload_view, size_t size, bool need_flush);
-    future<> flush();
     bool sync_write() { return _desc.sync_write(); };
+    future<payload_pos> append(managed_bytes_view payload_view, size_t size, bool need_flush);
+    future<fragmented_temporary_buffer> read(blob_offset_type offset, size_t size);
+    future<> flush();
 
 private:
     blobstore *_bs;

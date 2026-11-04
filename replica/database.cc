@@ -1933,58 +1933,16 @@ future<> database::do_apply(schema_ptr s, const frozen_mutation& m, tracing::tra
     }
 
     if(s->is_s3_object_meta_table()){
-        bool mutation_updated = false;
+        std::optional<bool> mutation_updated = false;
         mutation origin_mutation = m.unfreeze(s);
         mutation_partition& mp = origin_mutation.partition();
-        const column_definition* payload_cdef = s->get_column_definition(bytes("payload"));
         for (rows_entry& re : mp.mutable_clustered_rows()) {
-                deletable_row& row = re.row();
-                auto ts = row.cells().cell_at(payload_cdef->id).as_atomic_cell(*payload_cdef).timestamp();
-                atomic_cell_view cv = row.cells().cell_at(payload_cdef->id).as_atomic_cell(*payload_cdef);
-                dblog.debug( "before write payload, payload size: {}",cv.value_size());
-                if(cv.value_size() <= _cfg.object_payload_inline_threshold()){
-                    // tiny payload inlined into object meta
-                    continue;
-                }
-
+            deletable_row& row = re.row();
+            auto payload_extracted = co_await _blobstore->add_payload(*s, row.cells(), _cfg.object_payload_inline_threshold(), true);
+            if(payload_extracted.value_or(false)){
                 mutation_updated = true;
-                // save object payload to blobstore, and return the payload position info
-                std::exception_ptr ex;
-                payload_pos pos;
-                auto f_pos = co_await coroutine::as_future(cf.blobstore()->add_payload_sync(cv.value(), cv.value_size()));
-                if (!f_pos.failed()) {
-                    pos = f_pos.get();
-                } else {
-                    ex = f_pos.get_exception();
-                }
-                if(ex){
-                    co_await coroutine::exception(std::move(ex));
-                }
-
-                dblog.debug(" payload pos: blob {}, offset {}", pos.blob_id, pos.offset);
-
-                const column_definition* inlined_cdef = s->get_column_definition(bytes("inlined"));
-                const column_definition* blob_id_cdef = s->get_column_definition(bytes("blob_id"));
-                const column_definition* offset_cdef = s->get_column_definition(bytes("offset"));
-
-                // remove payload cell and inlined cell from object meta
-                row.cells().remove_if([&] (column_id id, atomic_cell_or_collection& c) {
-                    if(id == payload_cdef->id){
-                        return true;
-                    }
-                    if(id == inlined_cdef->id){
-                        return true;
-                    }
-                    return false;
-                });
-
-                // update object data inlined status to false
-                row.cells().apply(*inlined_cdef, atomic_cell::make_live(*(inlined_cdef->type), ts,  std::move(inlined_cdef->type->decompose(false))));
-                // add payload position info to object meta
-                row.cells().apply(*blob_id_cdef, atomic_cell::make_live(*(blob_id_cdef->type), ts,  std::move(blob_id_cdef->type->decompose(int64_t(pos.blob_id)))));
-                row.cells().apply(*offset_cdef, atomic_cell::make_live(*(offset_cdef->type), ts,  std::move(offset_cdef->type->decompose(int64_t(pos.offset)))));
             }
-
+        }
         if(mutation_updated){
             const_cast<frozen_mutation&>(m) = freeze(origin_mutation);
         }

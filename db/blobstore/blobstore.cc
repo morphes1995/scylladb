@@ -78,9 +78,9 @@ future<> db::blobstore::init(){
             // todo old blob treated as sealed temporarily
             blob_ptr blob_p= make_shared<blob>(this, std::move(f), desc, align, stat.size, stat.size);
             if(desc.sync_write()){
-                _sync_write_blobs.emplace_back(blob_p);
+                _sync_write_blobs[desc.id()] = blob_p;
             }else{
-                 _blobs.emplace_back(blob_p);
+                _blobs[desc.id()] = blob_p;
             }
             bslogger.info("init blob: {}, size {}, allocated_size {}, alignment {}", desc.filename(), stat.size, stat.allocated_size, align);
 
@@ -88,22 +88,15 @@ future<> db::blobstore::init(){
         }
     }
 
-    std::sort(_blobs.begin(), _blobs.end(), [](const blob_ptr& b1, const blob_ptr& b2) {
-        return b1->blob_id() < b2->blob_id();
-    });
-    std::sort(_sync_write_blobs.begin(), _sync_write_blobs.end(), [](const blob_ptr& b1, const blob_ptr& b2) {
-        return b1->blob_id() < b2->blob_id();
-    });
-
     // only the latest blob can write
     if(_blobs.size() > 1){
-        for(size_t i = 0; i < _blobs.size() - 1; i++){
-            _blobs[i]->set_sealed();
+         for (auto it = _blobs.begin(); it != std::prev(_blobs.end()); ++it) {
+             it->second->set_sealed();
         }
     }
     if(_sync_write_blobs.size() > 1){
-        for(size_t i = 0; i < _sync_write_blobs.size() - 1; i++){
-            _sync_write_blobs[i]->set_sealed();
+        for (auto it = _sync_write_blobs.begin(); it != std::prev(_sync_write_blobs.end()); ++it) {
+             it->second->set_sealed();
         }
     }
 
@@ -113,19 +106,104 @@ future<> db::blobstore::init(){
 }
 
 
-future<db::payload_pos>
-db::blobstore::add_payload_sync(managed_bytes_view payload_view, size_t size){
-    auto b = co_await writing_sync_write_blob(size);
-    auto pos = co_await b->append(payload_view, size, true);
+future<std::optional<bool>>
+db::blobstore::add_payload(const schema& schema, row& row,
+                           size_t object_payload_inline_threshold,
+                           bool sync){
+    const column_definition* inlined_cdef = schema.get_column_definition(bytes("inlined"));
+    auto inlined_cell = row.cell_at(inlined_cdef->id).as_atomic_cell(*inlined_cdef);
+    if(data_value(false) == boolean_type->deserialize(managed_bytes_view(inlined_cell.value()))){
+        bslogger.debug( "before  add_payload to blobstore, payload is not inlined, skip ");
+        co_return std::optional<bool>(false);
+    }
 
-    co_return pos;
+    const column_definition* payload_cdef = schema.get_column_definition(bytes("payload"));
+    auto ts = row.cell_at(payload_cdef->id).as_atomic_cell(*payload_cdef).timestamp();
+    atomic_cell_view cv = row.cell_at(payload_cdef->id).as_atomic_cell(*payload_cdef);
+    bslogger.debug( "before flush object meta, cf: {}  payload size: {}, threshold {}",schema.cf_name(), cv.value_size(), object_payload_inline_threshold);
+    if(cv.value_size() <= object_payload_inline_threshold){
+        bslogger.debug( "payload is too small ({} < {}), skip add to blobstore.", cv.value_size(), object_payload_inline_threshold);
+        co_return std::optional<bool>(false);
+    }
+
+    // save object payload to blobstore, and return the payload position info
+    auto pos = co_await append_payload(cv.value(), cv.value_size(), sync);
+    bslogger.debug(" payload flushed to blob {}, offset {}", pos.blob_id, pos.offset);
+
+    const column_definition* blob_id_cdef = schema.get_column_definition(bytes("blob_id"));
+    const column_definition* offset_cdef = schema.get_column_definition(bytes("offset"));
+    // remove payload cell and inlined cell from object meta
+    row.remove_if([&] (column_id id, atomic_cell_or_collection& c) {
+        if(id == payload_cdef->id){
+            return true;
+        }
+        if(id == inlined_cdef->id){
+            return true;
+        }
+        return false;
+    });
+
+    // update object data inlined status to false
+    row.apply(*inlined_cdef, atomic_cell::make_live(*(inlined_cdef->type), ts,  std::move(inlined_cdef->type->decompose(false))));
+    // add payload position info to object meta
+    row.apply(*blob_id_cdef, atomic_cell::make_live(*(blob_id_cdef->type), ts,  std::move(blob_id_cdef->type->decompose(int64_t(pos.blob_id)))));
+    row.apply(*offset_cdef, atomic_cell::make_live(*(offset_cdef->type), ts,  std::move(offset_cdef->type->decompose(int64_t(pos.offset)))));
+
+    co_return std::optional<bool>(true);
+}
+
+
+future<>
+db::blobstore::read_payload(const schema& schema, row& row){
+     const column_definition* payload_cdef = schema.get_column_definition(bytes("payload"));
+    const column_definition* inlined_cdef = schema.get_column_definition(bytes("inlined"));
+    auto inlined_cell = row.cell_at(inlined_cdef->id).as_atomic_cell(*inlined_cdef);
+    if(data_value(true) == boolean_type->deserialize(managed_bytes_view(inlined_cell.value()))){
+        co_return;
+    }
+
+    const column_definition* blob_id_cdef = schema.get_column_definition(bytes("blob_id"));
+    auto blob_id_cell = row.cell_at(blob_id_cdef->id).as_atomic_cell(*blob_id_cdef);
+    int64_t blob_id = value_cast<int64_t>(long_type->deserialize(managed_bytes_view(blob_id_cell.value())));
+
+    const column_definition* offset_cdef = schema.get_column_definition(bytes("offset"));
+    auto offset_cell = row.cell_at(offset_cdef->id).as_atomic_cell(*offset_cdef);
+    int64_t offset = value_cast<int64_t>(long_type->deserialize(managed_bytes_view(offset_cell.value())));
+
+    const column_definition* size_cdef = schema.get_column_definition(bytes("size"));
+    auto size_cell = row.cell_at(size_cdef->id).as_atomic_cell(*size_cdef);
+    int32_t size = value_cast<int32_t>(int32_type->deserialize(managed_bytes_view(size_cell.value())));
+
+    auto payload_fragmented_buffer = co_await read_payload(blob_id, offset, size);
+    auto ts = row.cell_at(inlined_cdef->id).as_atomic_cell(*inlined_cdef).timestamp();
+    row.remove_if([&] (column_id id, atomic_cell_or_collection& c) {
+        if(id == payload_cdef->id){
+            return true;
+        }
+        if(id == inlined_cdef->id){
+            return true;
+        }
+        return false;
+    });
+
+    // update object data inlined status to true
+    row.apply(*inlined_cdef, atomic_cell::make_live(*(inlined_cdef->type), ts,  std::move(inlined_cdef->type->decompose(true))));
+    // add payload cell
+    row.apply(*payload_cdef, atomic_cell::make_live(*(payload_cdef->type), ts, fragmented_temporary_buffer::view(payload_fragmented_buffer)));
+     co_return;
 }
 
 future<db::payload_pos>
-db::blobstore::add_payload(managed_bytes_view payload_view, size_t size){
-    auto b = co_await writing_blob(size);
-    auto pos = co_await b->append(payload_view, size, false);
-    co_return pos;
+db::blobstore::append_payload(managed_bytes_view payload_view, size_t size, bool sync){
+    if(sync){
+        auto b = co_await writing_sync_write_blob(size);
+        auto pos = co_await b->append(payload_view, size, true);
+        co_return pos;
+    }else{
+        auto b = co_await writing_blob(size);
+        auto pos = co_await b->append(payload_view, size, false);
+        co_return pos;
+    }
 }
 
 future<>
@@ -135,36 +213,49 @@ db::blobstore::flush(){
     co_await b->flush();
 }
 
+
+future<fragmented_temporary_buffer>
+db::blobstore::read_payload(blob_id_type blob_id, blob_offset_type offset, int64_t size){
+    bslogger.debug("mutation_querier, read payload from blob {}, offset {} , size {}", blob_id, offset, size);
+    auto blob_it = _blobs.find(blob_id);
+    auto sync_blob_it = _sync_write_blobs.find(blob_id);
+    SCYLLA_ASSERT( blob_it != _blobs.end() ||  sync_blob_it != _sync_write_blobs.end());
+    auto it = blob_it != _blobs.end() ? blob_it : sync_blob_it;
+
+    auto payload = co_await it->second->read(offset, size_t(size));
+    co_return  payload;
+}
+
 future<db::blobstore::blob_ptr> db::blobstore::writing_blob(size_t size) {
-    if (_blobs.empty() || !_blobs.back()->is_still_writing(size)) {
+    if (_blobs.empty() || !_blobs.rbegin()->second->is_still_writing(size)) {
         return _blob_create_semaphore.wait().then([this, size]() {
             // double check
-            if (_blobs.empty() || !_blobs.back()->is_still_writing(size)) {
+            if (_blobs.empty() || !_blobs.rbegin()->second->is_still_writing(size)) {
                 return new_blob(false);
             }else{
-               return make_ready_future<blob_ptr>(_blobs.back());
+               return make_ready_future<blob_ptr>(_blobs.rbegin()->second);
             }
         }).finally([this]() {
             _blob_create_semaphore.signal();
         });
     }
-    return make_ready_future<blob_ptr>(_blobs.back());
+    return make_ready_future<blob_ptr>(_blobs.rbegin()->second);
 }
 
 future<db::blobstore::blob_ptr> db::blobstore::writing_sync_write_blob(size_t size) {
-    if (_sync_write_blobs.empty() || !_sync_write_blobs.back()->is_still_writing(size)) {
+    if (_sync_write_blobs.empty() || !_sync_write_blobs.rbegin()->second->is_still_writing(size)) {
         return _blob_create_semaphore.wait().then([this, size]() {
             // double check
-            if (_sync_write_blobs.empty() || !_sync_write_blobs.back()->is_still_writing(size)) {
+            if (_sync_write_blobs.empty() || !_sync_write_blobs.rbegin()->second->is_still_writing(size)) {
                 return new_blob(true);
             }else{
-               return make_ready_future<blob_ptr>(_sync_write_blobs.back());
+               return make_ready_future<blob_ptr>(_sync_write_blobs.rbegin()->second);
             }
         }).finally([this]() {
             _blob_create_semaphore.signal();
         });
     }
-    return make_ready_future<blob_ptr>(_sync_write_blobs.back());
+    return make_ready_future<blob_ptr>(_sync_write_blobs.rbegin()->second);
 }
 
 future<db::blobstore::blob_ptr> db::blobstore::new_blob(bool sync_write){
@@ -176,7 +267,7 @@ future<db::blobstore::blob_ptr> db::blobstore::new_blob(bool sync_write){
         auto f = co_await open_file_dma(_cfg.blobstore_dir_location + "/" + d.filename(), open_flags::rw | open_flags::create);
         size_t  align = f.disk_write_dma_alignment();
         blob_ptr blob_p= make_shared<blob>(this, std::move(f), d, align, max_size);
-        _blobs.emplace_back(blob_p);
+        _blobs[d.id()] = blob_p;
         bslogger.info("blob file {} opening without o_dsync created. alignment {}, max size {}",
                       d.filename(), align, max_size);
         co_return blob_p;
@@ -221,7 +312,7 @@ future<db::blobstore::blob_ptr> db::blobstore::new_blob(bool sync_write){
     align = f.disk_write_dma_alignment();
 
     blob_ptr blob_p= make_shared<blob>(this, std::move(f), d, align, size);
-    _sync_write_blobs.emplace_back(blob_p);
+    _sync_write_blobs[d.id()] = blob_p;
     bslogger.info("blob file {} opening with o_dsync created. alignment {}, max size {}", d.filename(), align, size);
     co_return blob_p;
 }

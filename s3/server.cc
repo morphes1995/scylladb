@@ -100,9 +100,15 @@ private:
                 case OP_PUT:
                     co_return co_await handle_object_put(bucket, object, std::move(req));
                     break;
-                case OP_GET:
                 case OP_HEAD:
-                    co_return co_await handle_object_get(bucket, object, std::move(req));
+                    co_return co_await handle_object_head(bucket, object, std::move(req));
+                    break;
+                case OP_GET:
+                    if (req->query_parameters.contains("acl")){
+                        s3logger.debug("get acl of object {} in bucket {}, ", object, bucket);
+                    }else{
+                        co_return co_await handle_object_get(bucket, object, std::move(req));
+                    }
                     break;
                 default:
                     s3logger.debug("{} {} not implemented ", method, req_url);
@@ -160,6 +166,8 @@ private:
         for (const column_definition& cdef : schema->regular_columns()) {
             if(cdef.name_as_text() == "size"){
                 row.cells().apply(cdef, atomic_cell::make_live(*cdef.type, now, std::move(cdef.type->decompose(size))));
+            }else if(cdef.name_as_text() == "etag"){
+                row.cells().apply(cdef, atomic_cell::make_live(*cdef.type, now, std::move(cdef.type->decompose(md5sum))));
             }else if(cdef.name_as_text() == "payload"){
                 row.cells().apply(cdef, atomic_cell::make_live(*cdef.type, now, payload_frag_buffers_view));
             }else if(cdef.name_as_text() == "inlined"){
@@ -208,7 +216,8 @@ private:
                                                              schema->version(),
                                                              partition_slice,
                                                              _proxy.get_max_result_size(partition_slice),
-                                                             query::tombstone_limit(_proxy.get_tombstone_limit()));
+                                                             query::tombstone_limit(_proxy.get_tombstone_limit()),
+                                                             query::row_limit(1));
 
         co_return co_await _proxy.query(schema,
                               std::move(command),
@@ -230,30 +239,36 @@ private:
                                             return make_ready_future<s3_op_handle_result>(std::move(res));
                                         }
 
-                                        auto row_cnt = result_set->size();
-                                        if(row_cnt > 1){
-                                            s3logger.warn("object {} in bucket  {}  has {} versions to purge ", object, bucket, row_cnt -1);
-                                        }
+                                        SCYLLA_ASSERT(result_set->size() == 1);
 
                                         auto& row = *result_set->rows().begin(); // we only use the latest obj version
                                         const auto& columns = selection->get_columns();
                                         auto column_it = columns.begin();
                                         for (const managed_bytes_opt& cell : row) {
-                                            std::string column_name = (*column_it)->name_as_text();
 
+                                            if(!cell){
+                                                column_it ++;
+                                                continue;
+                                            }
+
+                                            std::string column_name = (*column_it)->name_as_text();
                                             cell->with_linearized([&] (bytes_view c) {
 
                                                 if(column_name == "payload"){
                                                     sstring payload = sstring(to_sstring_view(c)); // convert from hex view to string view
-                                                    md5_hasher h;
-                                                    h.update(payload.c_str(), payload.size());
-                                                    auto md5sum = to_sstring(h.finalize());
-                                                    res.header["Etag"] = "\"" + md5sum + "\"";
-                                                    s3logger.debug("object {} in bucket {},  md5:{} ", object, bucket, res.header["Etag"]);
+                                                    s3logger.debug("object {} in bucket {},  payload: {}", object, bucket, payload);
                                                     res.resp_body = std::move(payload);
                                                 }else if(column_name == "time"){
                                                     int64_t nanoseconds = value_cast<int64_t>(long_type->deserialize(c));
                                                     res.header["Last-Modified"] = format_time_gmt(nanoseconds);
+                                                    s3logger.debug("object {} in bucket {},  time: {}", object, bucket, nanoseconds);
+                                                }else if(column_name == "size"){
+                                                    int32_t size = value_cast<int32_t>(int32_type->deserialize(c));
+                                                    s3logger.debug("object {} in bucket {},  size: {}", object, bucket, size);
+                                                }else if(column_name == "etag"){
+                                                    sstring etag = value_cast<sstring>(utf8_type->deserialize(c));
+                                                    s3logger.debug("object {}/{} etag {}", bucket, object, etag);
+                                                    res.header["Etag"] = "\"" + etag + "\"";
                                                 }
 
                                             });
@@ -267,6 +282,101 @@ private:
 
     }
 
+    future<s3_op_handle_result> handle_object_head(sstring& bucket, sstring& object, std::unique_ptr<request> req){
+        s3_op_handle_result res;
+
+        schema_ptr schema;
+        try{
+           schema =  _proxy.data_dictionary().find_schema("s3", "object_metadata");
+        }catch (data_dictionary::no_such_column_family){
+            res.status =reply::status_type::internal_server_error;
+            co_return res;
+        }
+
+        // assemble pk and ck
+        std::vector<bytes> raw_pk;
+        raw_pk.push_back(to_bytes(bucket));
+        raw_pk.push_back(int32_type->decompose(bucket_shard(object, 1024)));
+        partition_key pk = partition_key::from_exploded(raw_pk);
+        std::vector<bytes> raw_ck;
+        raw_ck.push_back(to_bytes(object));
+        clustering_key ck = clustering_key::from_exploded(raw_ck);
+
+        dht::partition_range_vector partition_ranges{dht::partition_range(dht::decorate_key(*schema, pk))};
+        std::vector<query::clustering_range> ck_bounds;
+        // we get all versions of the object
+        ck_bounds.push_back(query::clustering_range::make_starting_with(query::clustering_range::bound(ck)));
+
+        const column_definition* size_col = schema->get_column_definition(bytes("size"));
+        const column_definition* etag_col = schema->get_column_definition(bytes("etag"));
+        const column_definition* time_col = schema->get_column_definition(bytes("time"));
+        auto selection = cql3::selection::selection::for_columns(schema, {size_col, etag_col, time_col});
+        auto partition_slice = query::partition_slice(std::move(ck_bounds), {},
+                                                      query::column_id_vector{size_col->id, etag_col->id, time_col->id},
+                                                      selection->get_query_options());
+        auto command = ::make_lw_shared<query::read_command>(schema->id(),
+                                                             schema->version(),
+                                                             partition_slice,
+                                                             _proxy.get_max_result_size(partition_slice),
+                                                             query::tombstone_limit(_proxy.get_tombstone_limit()),
+                                                             query::row_limit(1));
+
+        co_return co_await _proxy.query(schema,
+                          std::move(command),
+                          std::move(partition_ranges),
+                          db::consistency_level::LOCAL_QUORUM,
+                          service::storage_proxy::coordinator_query_options(db::no_timeout, empty_service_permit(), service::client_state::for_internal_calls()))
+                          .then([bucket, object, schema,
+                                 partition_slice = std::move(partition_slice),
+                                 selection = std::move(selection)] (service::storage_proxy::coordinator_query_result qr) mutable {
+                                    s3_op_handle_result res;
+                                    // handle query result
+                                    cql3::selection::result_set_builder builder(*selection, gc_clock::now());
+                                    query::result_view::consume(*qr.query_result, partition_slice, cql3::selection::result_set_builder::visitor(builder, *schema, *selection));
+
+                                    auto result_set = builder.build();
+                                    if (result_set->empty()) {
+                                        s3logger.debug("object {}/{} not found", bucket, object);
+                                        res.status = reply::status_type::not_found;
+                                        return make_ready_future<s3_op_handle_result>(std::move(res));
+                                    }
+
+                                    SCYLLA_ASSERT(result_set->size() == 1);
+                                    auto& row = *result_set->rows().begin(); // we only use the latest obj version
+                                    const auto& columns = selection->get_columns();
+                                    auto column_it = columns.begin();
+                                    for (const managed_bytes_opt& cell : row) {
+                                        std::string column_name = (*column_it)->name_as_text();
+                                        if(!cell){
+                                            column_it ++;
+                                            continue;
+                                        }
+                                        cell->with_linearized([&] (bytes_view c) {
+                                            if(column_name == "time"){
+                                                int64_t nanoseconds = value_cast<int64_t>(long_type->deserialize(c));
+                                                s3logger.debug("object {}/{} time {}", bucket, object, nanoseconds);
+                                                res.header["Last-Modified"] = format_time_gmt(nanoseconds);
+                                            }else if(column_name == "etag"){
+                                                sstring etag = value_cast<sstring>(utf8_type->deserialize(c));
+                                                s3logger.debug("object {}/{} etag {}", bucket, object, etag);
+                                                res.header["ETag"] = "\"" + etag + "\"";
+                                            }else if(column_name == "size"){
+                                                int32_t size = value_cast<int32_t>(int32_type->deserialize(c));
+                                                s3logger.debug("object {}/{} size {}", bucket, object, size);
+                                                res.header["Content-Length"] = to_sstring(size);
+                                            }
+                                        });
+
+                                        column_it ++;
+                                    }
+
+                                    res.status = reply::status_type::ok;
+                                    return make_ready_future<s3_op_handle_result>(std::move(res));
+                                });
+
+    }
+
+
 public:
     s3_api_handler(service::storage_proxy& proxy,
                    qos::service_level_controller& sl_controller)
@@ -277,15 +387,13 @@ public:
             sstring url = req->get_url();
              co_return co_await do_handle_api_request(std::move(req)).then_wrapped([url = std::move(url), rep = std::move(rep)](future<s3_op_handle_result> f) mutable {
                s3_op_handle_result res = f.get();
-               s3logger.debug("s3 server handling {} finished, ret: {}  ", url, res.status);
-
                rep->_status = res.status;
                for(auto &item: res.header){
                    rep->add_header(item.first, item.second);
                }
                rep->write_body(res.mime_type, res.resp_body);
                rep->content_length = res.resp_body.size();
-
+               s3logger.debug("s3 server handling {} finished, ret: {} , body content_length {} ", url, res.status, rep->content_length);
                rep->done();
                return make_ready_future<std::unique_ptr<reply>>(std::move(rep));
          });

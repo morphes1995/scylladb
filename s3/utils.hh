@@ -6,6 +6,18 @@
 
 namespace s3{
 
+enum http_op {
+  OP_GET,
+  OP_PUT,
+  OP_DELETE,
+  OP_HEAD,
+  OP_POST,
+  OP_COPY,
+  OP_OPTIONS,
+  OP_UNKNOWN,
+};
+http_op op_from_method(const char *method);
+
 
 // Used for generating object version nano timestamps.
 using timestamp_type = int64_t;

@@ -1277,7 +1277,11 @@ redis = [
         ]
 
 s3 = [
+    's3/api_router.cc',
+    's3/base_handler.cc',
+    's3/bucket_handler.cc',
     's3/controller.cc',
+    's3/object_handler.cc',
     's3/server.cc',
     's3/utils.cc',
 ]

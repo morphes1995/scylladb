@@ -53,6 +53,21 @@ struct payload_pos{
     blob_offset_type offset;
 };
 
+struct object_meta_columns {
+    const column_definition* inlined;
+    const column_definition* payload;
+    const column_definition* blob_id;
+    const column_definition* offset;
+    const column_definition* size;
+
+    explicit object_meta_columns(const schema& s)
+        : inlined(s.get_column_definition(bytes("inlined")))
+        , payload(s.get_column_definition(bytes("payload")))
+        , blob_id(s.get_column_definition(bytes("blob_id")))
+        , offset(s.get_column_definition(bytes("offset")))
+        , size(s.get_column_definition(bytes("size"))) {}
+};
+
 class blob;
 class blobstore{
 public:
@@ -94,6 +109,11 @@ private:
     // append payload to blob persistently
     future<payload_pos> append_payload(managed_bytes_view payload_view, size_t size, bool sync);
     future<fragmented_temporary_buffer> read_payload(blob_id_type blob_id, blob_offset_type offset, int64_t size);
+
+    template <typename T>
+    T read_cell_value(const row& r, const column_definition* cdef, const abstract_type& type);
+    void remove_columns(row& r, std::initializer_list<column_id> ids_to_remove);
+    void set_live_cell(row& r, const column_definition* cdef, api::timestamp_type ts, auto&& raw_bytes);
 };
 
 

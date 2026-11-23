@@ -1,7 +1,11 @@
 add_library(s3 STATIC)
 target_sources(s3
   PRIVATE
+    api_router.cc
+    base_handler.cc
+    bucket_handler.cc
     controller.cc
+    object_handler.cc
     server.cc
     utils.cc
     ${cql_grammar_srcs})

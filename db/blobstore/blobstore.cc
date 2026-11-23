@@ -105,92 +105,60 @@ future<> db::blobstore::init(){
     bslogger.info("blobstore init finish.  blob_id {}, ts_base_id {}", blob_id, base_id);
 }
 
-
 future<std::optional<bool>>
 db::blobstore::add_payload(const schema& schema, row& row,
                            size_t object_payload_inline_threshold,
-                           bool sync){
-    const column_definition* inlined_cdef = schema.get_column_definition(bytes("inlined"));
-    auto inlined_cell = row.cell_at(inlined_cdef->id).as_atomic_cell(*inlined_cdef);
-    if(data_value(false) == boolean_type->deserialize(managed_bytes_view(inlined_cell.value()))){
-        bslogger.debug( "before  add_payload to blobstore, payload is not inlined, skip ");
-        co_return std::optional<bool>(false);
+                           bool sync) {
+    object_meta_columns cols(schema);
+
+    if (!read_cell_value<bool>(row, cols.inlined, *boolean_type)) {
+        bslogger.debug("before add_payload to blobstore, payload is not inlined, skip");
+        co_return false;
     }
 
-    const column_definition* payload_cdef = schema.get_column_definition(bytes("payload"));
-    auto ts = row.cell_at(payload_cdef->id).as_atomic_cell(*payload_cdef).timestamp();
-    atomic_cell_view cv = row.cell_at(payload_cdef->id).as_atomic_cell(*payload_cdef);
-    bslogger.debug( "before flush object meta, cf: {}  payload size: {}, threshold {}",schema.cf_name(), cv.value_size(), object_payload_inline_threshold);
-    if(cv.value_size() <= object_payload_inline_threshold){
-        bslogger.debug( "payload is too small ({} < {}), skip add to blobstore.", cv.value_size(), object_payload_inline_threshold);
-        co_return std::optional<bool>(false);
+    atomic_cell_view payload_cv = row.cell_at(cols.payload->id).as_atomic_cell(*cols.payload);
+    bslogger.debug("before append_payload, cf: {} payload size: {}, threshold {}",
+                   schema.cf_name(), payload_cv.value_size(), object_payload_inline_threshold);
+
+    if (payload_cv.value_size() <= object_payload_inline_threshold) {
+        bslogger.debug("payload is too small ({} <= {}), skip add to blobstore.",
+                       payload_cv.value_size(), object_payload_inline_threshold);
+        co_return false;
     }
 
-    // save object payload to blobstore, and return the payload position info
-    auto pos = co_await append_payload(cv.value(), cv.value_size(), sync);
-    bslogger.debug(" payload flushed to blob {}, offset {}", pos.blob_id, pos.offset);
+    // Flush payload to blobstore and get storage coordinates
+    auto pos = co_await append_payload(payload_cv.value(), payload_cv.value_size(), sync);
+    bslogger.debug("payload flushed to blob {}, offset {}", pos.blob_id, pos.offset);
 
-    const column_definition* blob_id_cdef = schema.get_column_definition(bytes("blob_id"));
-    const column_definition* offset_cdef = schema.get_column_definition(bytes("offset"));
-    // remove payload cell and inlined cell from object meta
-    row.remove_if([&] (column_id id, atomic_cell_or_collection& c) {
-        if(id == payload_cdef->id){
-            return true;
-        }
-        if(id == inlined_cdef->id){
-            return true;
-        }
-        return false;
-    });
+    api::timestamp_type ts = payload_cv.timestamp();
+    // Replace inlined payload with blob pointer metadata
+    remove_columns(row, {cols.payload->id, cols.inlined->id});
+    set_live_cell(row, cols.inlined, ts, cols.inlined->type->decompose(false));
+    set_live_cell(row, cols.blob_id, ts, cols.blob_id->type->decompose(int64_t(pos.blob_id)));
+    set_live_cell(row, cols.offset,  ts, cols.offset->type->decompose(int64_t(pos.offset)));
 
-    // update object data inlined status to false
-    row.apply(*inlined_cdef, atomic_cell::make_live(*(inlined_cdef->type), ts,  std::move(inlined_cdef->type->decompose(false))));
-    // add payload position info to object meta
-    row.apply(*blob_id_cdef, atomic_cell::make_live(*(blob_id_cdef->type), ts,  std::move(blob_id_cdef->type->decompose(int64_t(pos.blob_id)))));
-    row.apply(*offset_cdef, atomic_cell::make_live(*(offset_cdef->type), ts,  std::move(offset_cdef->type->decompose(int64_t(pos.offset)))));
-
-    co_return std::optional<bool>(true);
+    co_return true;
 }
 
-
 future<>
-db::blobstore::read_payload(const schema& schema, row& row){
-     const column_definition* payload_cdef = schema.get_column_definition(bytes("payload"));
-    const column_definition* inlined_cdef = schema.get_column_definition(bytes("inlined"));
-    auto inlined_cell = row.cell_at(inlined_cdef->id).as_atomic_cell(*inlined_cdef);
-    if(data_value(true) == boolean_type->deserialize(managed_bytes_view(inlined_cell.value()))){
+db::blobstore::read_payload(const schema& schema, row& row) {
+    object_meta_columns cols(schema);
+
+    if (read_cell_value<bool>(row, cols.inlined, *boolean_type)) {
         co_return;
     }
 
-    const column_definition* blob_id_cdef = schema.get_column_definition(bytes("blob_id"));
-    auto blob_id_cell = row.cell_at(blob_id_cdef->id).as_atomic_cell(*blob_id_cdef);
-    int64_t blob_id = value_cast<int64_t>(long_type->deserialize(managed_bytes_view(blob_id_cell.value())));
+    int64_t blob_id = read_cell_value<int64_t>(row, cols.blob_id, *long_type);
+    int64_t offset  = read_cell_value<int64_t>(row, cols.offset,  *long_type);
+    int32_t size    = read_cell_value<int32_t>(row, cols.size,    *int32_type);
 
-    const column_definition* offset_cdef = schema.get_column_definition(bytes("offset"));
-    auto offset_cell = row.cell_at(offset_cdef->id).as_atomic_cell(*offset_cdef);
-    int64_t offset = value_cast<int64_t>(long_type->deserialize(managed_bytes_view(offset_cell.value())));
+    auto ts = row.cell_at(cols.inlined->id).as_atomic_cell(*cols.inlined).timestamp();
+    auto payload_buf = co_await read_payload(blob_id, offset, size);
 
-    const column_definition* size_cdef = schema.get_column_definition(bytes("size"));
-    auto size_cell = row.cell_at(size_cdef->id).as_atomic_cell(*size_cdef);
-    int32_t size = value_cast<int32_t>(int32_type->deserialize(managed_bytes_view(size_cell.value())));
-
-    auto payload_fragmented_buffer = co_await read_payload(blob_id, offset, size);
-    auto ts = row.cell_at(inlined_cdef->id).as_atomic_cell(*inlined_cdef).timestamp();
-    row.remove_if([&] (column_id id, atomic_cell_or_collection& c) {
-        if(id == payload_cdef->id){
-            return true;
-        }
-        if(id == inlined_cdef->id){
-            return true;
-        }
-        return false;
-    });
-
-    // update object data inlined status to true
-    row.apply(*inlined_cdef, atomic_cell::make_live(*(inlined_cdef->type), ts,  std::move(inlined_cdef->type->decompose(true))));
-    // add payload cell
-    row.apply(*payload_cdef, atomic_cell::make_live(*(payload_cdef->type), ts, fragmented_temporary_buffer::view(payload_fragmented_buffer)));
-     co_return;
+    // Replace external blob reference with inlined payload data
+    remove_columns(row, {cols.payload->id, cols.inlined->id});
+    set_live_cell(row, cols.inlined, ts, cols.inlined->type->decompose(true));
+    set_live_cell(row, cols.payload, ts, fragmented_temporary_buffer::view(payload_buf));
 }
 
 future<db::payload_pos>
@@ -350,4 +318,19 @@ db::blobstore::buffer_type db::blobstore::acquire_buffer(size_t s, size_t alignm
 
     bslogger.debug("Allocated {} k buffer", s / 1024);
     return fragmented_temporary_buffer(std::move(buffers), s);
+}
+
+
+template <typename T>
+T db::blobstore::read_cell_value(const row& r, const column_definition* cdef, const abstract_type& type) {
+    auto cell = r.cell_at(cdef->id).as_atomic_cell(*cdef);
+    return value_cast<T>(type.deserialize(managed_bytes_view(cell.value())));
+}
+void db::blobstore::remove_columns(row& r, std::initializer_list<column_id> ids_to_remove) {
+    r.remove_if([&] (column_id id, atomic_cell_or_collection&) {
+        return std::find(ids_to_remove.begin(), ids_to_remove.end(), id) != ids_to_remove.end();
+    });
+}
+void db::blobstore::set_live_cell(row& r, const column_definition* cdef, api::timestamp_type ts, auto&& raw_bytes) {
+    r.apply(*cdef, atomic_cell::make_live(*cdef->type, ts, std::forward<decltype(raw_bytes)>(raw_bytes)));
 }

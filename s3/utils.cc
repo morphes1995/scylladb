@@ -2,6 +2,28 @@
 
 namespace s3{
 
+http_op op_from_method(const char *method)
+{
+  if (!method)
+    return OP_UNKNOWN;
+  if (strcmp(method, "GET") == 0)
+    return OP_GET;
+  if (strcmp(method, "PUT") == 0)
+    return OP_PUT;
+  if (strcmp(method, "DELETE") == 0)
+    return OP_DELETE;
+  if (strcmp(method, "HEAD") == 0)
+    return OP_HEAD;
+  if (strcmp(method, "POST") == 0)
+    return OP_POST;
+  if (strcmp(method, "COPY") == 0)
+    return OP_COPY;
+  if (strcmp(method, "OPTIONS") == 0)
+    return OP_OPTIONS;
+
+  return OP_UNKNOWN;
+}
+
 
 int32_t bucket_shard(const seastar::sstring& key, int max_shards) {
     uint32_t hash = 0;

@@ -536,6 +536,7 @@ private:
     std::unique_ptr<file_writer> _index_writer;
     bool _tombstone_written = false;
     bool _static_row_written = false;
+    bool _payload_extracted_to_blobstore = false;
     // The length of partition header (partition key, partition deletion and static row, if present)
     // as written to the data file
     // Used for writing promoted index
@@ -1316,7 +1317,10 @@ stop_iteration writer::consume(clustering_row&& cr) {
 
 
     if(_blobstore != nullptr && _schema.is_s3_object_meta_table()){
-        _blobstore->add_payload(_schema, cr.cells(), _cfg.object_payload_inline_threshold_when_flush, false).get();
+        auto extracted = _blobstore->add_payload(_schema, cr.cells(), _cfg.object_payload_inline_threshold_when_flush, false).get();
+        if (extracted.value_or(false)){
+            _payload_extracted_to_blobstore = true;
+        }
     }
 
     write_clustered(cr);
@@ -1483,8 +1487,10 @@ void writer::consume_end_of_stream() {
         _sst._schema->get_partitioner().name(), _sst._schema->bloom_filter_fp_chance(),
         _sst._schema, _sst.get_first_decorated_key(), _sst.get_last_decorated_key(), _enc_stats);
     close_data_writer();
-    if(_blobstore && _schema.is_s3_object_meta_table()){
-        _blobstore->flush().get(); // make sure all payload persist on blobstore
+    if(_blobstore
+       && _schema.is_s3_object_meta_table()
+       && _payload_extracted_to_blobstore){
+        _blobstore->flush().get(); // if there are payloads extracted to blobstore, make sure all payload persist on blobstore
     }
     _sst.write_summary();
     _sst.maybe_rebuild_filter_from_index(_num_partitions_consumed);

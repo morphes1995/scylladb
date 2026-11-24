@@ -105,6 +105,7 @@ private:
     future<blob_ptr> writing_blob(size_t size);
     future<blob_ptr> writing_sync_write_blob(size_t size);
     future<std::vector<blob_descriptor>> list_blobs(sstring &dirname) const;
+    future<> init_blobs_status(std::map<blob_id_type, blob_ptr> blobs);
 
     // append payload to blob persistently
     future<payload_pos> append_payload(managed_bytes_view payload_view, size_t size, bool sync);
@@ -123,6 +124,12 @@ private:
  */
 class blob : public enable_shared_from_this<blob>{
 public:
+
+    static constexpr size_t blob_header_size = 4096;
+    static constexpr uint32_t blob_header_magic = 0x827A7A0B;
+    // uint32_t : payload size
+    static constexpr size_t payload_overhead_size = sizeof(uint32_t);
+
     blob(blobstore *bs, file&& f, const blob_descriptor& d, size_t align, size_t max_size, size_t file_pos = 0):
          _bs(bs)
          , _f(f)
@@ -133,7 +140,7 @@ public:
          , _pending_ops(true)
     {
         if (_file_pos >= max_size){
-            _closed = true;
+            _sealed = true;
         }
     }
 
@@ -141,9 +148,10 @@ public:
     blob_id_type blob_id(){
         return _desc.id();
     }
-    void set_sealed() {
-        _closed = true;
-    };
+    void set_sealed() { _sealed = true; };
+    void set_file_pos(uint64_t file_pos) { _file_pos = file_pos; };
+    size_t get_max_size(){ return _max_size;};
+    future<uint64_t> probe_actual_file_position();
 
     bool sync_write() { return _desc.sync_write(); };
     future<payload_pos> append(managed_bytes_view payload_view, size_t size, bool need_flush);
@@ -162,7 +170,7 @@ private:
     utils::flush_queue<uint64_t, std::less<uint64_t>, lowres_clock> _pending_ops;
 
     rwlock _lock; // used as a barrier between write & flush
-    bool _closed = false;
+    bool _sealed = false;
     future<> do_flush(uint64_t pos, bool force = false);
 };
 

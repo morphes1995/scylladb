@@ -66,44 +66,62 @@ future<> db::blobstore::init(){
     for(auto& desc : descs) {
         // only open blobs belong to this shard
         // prerequisite: keep the shard number unchanged when scylla restart !, todo : blob data resharding when cpu count change ?
-        if( (desc.id() >> max_base_bits) == this_shard_id() ) {
-            auto open_flags = open_flags::rw;
-            if(desc.sync_write()){
-                open_flags = open_flags | open_flags::dsync;
-            }
-
-            auto f = co_await open_file_dma(_cfg.blobstore_dir_location + "/" + desc.filename(), open_flags);
-            auto stat = co_await file_stat(_cfg.blobstore_dir_location + "/" + desc.filename(), follow_symlink::no);
-            auto align = f.disk_write_dma_alignment();
-            // todo old blob treated as sealed temporarily
-            blob_ptr blob_p= make_shared<blob>(this, std::move(f), desc, align, stat.size, stat.size);
-            if(desc.sync_write()){
-                _sync_write_blobs[desc.id()] = blob_p;
-            }else{
-                _blobs[desc.id()] = blob_p;
-            }
-            bslogger.info("init blob: {}, size {}, allocated_size {}, alignment {}", desc.filename(), stat.size, stat.allocated_size, align);
-
-            base_id = std::max(base_id, desc.id() & base_mask);
+        if((desc.id() >> max_base_bits) != this_shard_id()){
+            continue;
         }
+        auto open_flags = open_flags::rw;
+        if(desc.sync_write()){
+            open_flags = open_flags | open_flags::dsync;
+        }
+
+        auto f = co_await open_file_dma(_cfg.blobstore_dir_location + "/" + desc.filename(), open_flags);
+        auto stat = co_await file_stat(_cfg.blobstore_dir_location + "/" + desc.filename(), follow_symlink::no);
+        auto align = f.disk_write_dma_alignment();
+        blob_ptr blob_p= make_shared<blob>(this, std::move(f), desc, align, stat.size);
+        if(desc.sync_write()){
+            _sync_write_blobs[desc.id()] = blob_p;
+        }else{
+            _blobs[desc.id()] = blob_p;
+        }
+        bslogger.info("init blob: {}, size {}, allocated_size {}, alignment {}", desc.filename(), stat.size, stat.allocated_size, align);
+
+        base_id = std::max(base_id, desc.id() & base_mask);
     }
 
-    // only the latest blob can write
-    if(_blobs.size() > 1){
-         for (auto it = _blobs.begin(); it != std::prev(_blobs.end()); ++it) {
-             it->second->set_sealed();
-        }
-    }
-    if(_sync_write_blobs.size() > 1){
-        for (auto it = _sync_write_blobs.begin(); it != std::prev(_sync_write_blobs.end()); ++it) {
-             it->second->set_sealed();
-        }
-    }
+    co_await init_blobs_status(_sync_write_blobs);
+    co_await init_blobs_status(_blobs);
 
     // base blob_id : [shard_id | ts_base_id]
     blob_id = ( blob_id_type(this_shard_id()) << max_base_bits ) | base_id;
     bslogger.info("blobstore init finish.  blob_id {}, ts_base_id {}", blob_id, base_id);
 }
+
+
+future<>
+db::blobstore::init_blobs_status(std::map<blob_id_type, blob_ptr> blobs){
+    if(blobs.empty()){
+        co_return;
+    }
+
+    blob_ptr last_blob = std::prev(blobs.end())->second;
+    // probe the real file_pos
+    auto file_pos = co_await last_blob->probe_actual_file_position();
+    last_blob->set_file_pos(file_pos);
+    SCYLLA_ASSERT(file_pos <= last_blob->get_max_size());
+    if(last_blob->get_max_size() == file_pos){
+        last_blob->set_sealed();
+    }
+
+    // we assume only the last blob may be half-full
+    // so just set all blob sealed except last one
+    for (auto it = blobs.begin(); it != std::prev(blobs.end()); ++it) {
+        it->second->set_file_pos(it->second->get_max_size());
+        it->second->set_sealed();
+    }
+
+    co_return;
+}
+
 
 future<std::optional<bool>>
 db::blobstore::add_payload(const schema& schema, row& row,
@@ -163,6 +181,7 @@ db::blobstore::read_payload(const schema& schema, row& row) {
 
 future<db::payload_pos>
 db::blobstore::append_payload(managed_bytes_view payload_view, size_t size, bool sync){
+    SCYLLA_ASSERT( size > 0 );
     if(sync){
         auto b = co_await writing_sync_write_blob(size);
         auto pos = co_await b->append(payload_view, size, true);
@@ -233,11 +252,13 @@ future<db::blobstore::blob_ptr> db::blobstore::new_blob(bool sync_write){
     if(!sync_write){
         // open file without o_dsync, no need preallocate and zero-filled
         auto f = co_await open_file_dma(_cfg.blobstore_dir_location + "/" + d.filename(), open_flags::rw | open_flags::create);
-        size_t  align = f.disk_write_dma_alignment();
+        co_await f.truncate(max_size);
+        auto size =co_await f.size();
+        size_t align = f.disk_write_dma_alignment();
         blob_ptr blob_p= make_shared<blob>(this, std::move(f), d, align, max_size);
         _blobs[d.id()] = blob_p;
-        bslogger.info("blob file {} opening without o_dsync created. alignment {}, max size {}",
-                      d.filename(), align, max_size);
+        bslogger.info("blob file {} opening without o_dsync created. alignment {}, max size {}, f.size {}",
+                      d.filename(), align, max_size, size);
         co_return blob_p;
     }
 

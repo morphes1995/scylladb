@@ -4,6 +4,7 @@
 #include <seastar/core/semaphore.hh>
 #include <seastar/core/stream.hh>
 #include <seastar/core/rwlock.hh>
+#include <seastar/core/queue.hh>
 #include "db/config.hh"
 #include "utils/flush_queue.hh"
 #include "mutation/mutation_fragment.hh"
@@ -23,6 +24,8 @@ static const blob_id_type cpu_mask = ~base_mask;
 struct blobstore_config{
     sstring blobstore_dir_location;
     uint64_t blob_size_in_mb;
+    // Max number of blob file to keep in pre-created reserve map.
+    uint16_t max_reserve_blobs;
 
     static blobstore_config from_db_config(const db::config& cfg);
 };
@@ -85,27 +88,36 @@ public:
     future<> read_payload(const schema& schema, row& row);
     future<> flush();
 private:
-
     blob_id_type blob_id =0;
 
+    semaphore _blob_create_semaphore;  // protect blob file creation without o_dsync
     std::map<blob_id_type, blob_ptr> _blobs; // blob file without o_dsync
+
     std::map<blob_id_type, blob_ptr> _sync_write_blobs; // blob file with o_dsync
-    semaphore _blob_create_semaphore;
+    queue<blob_ptr> _reserved_sync_write_blobs; //  pre-created blob file with o_dsync
+    // don't issue a new call of sync_write_blob creation until the old one has terminated
+    std::optional<shared_future<with_clock<db::timeout_clock>>> _sync_write_blob_allocating;
 
     std::vector<buffer_type> buffers;
 
 
-    [[maybe_unused]]bool _shutdown = false;
+    bool _shutdown = false;
 
     blob_id_type next_blob_id(){
         return ++ blob_id;
     }
 
-    future<blob_ptr> new_blob(bool sync_write);
     future<blob_ptr> writing_blob(size_t size);
+    future<blob_ptr> new_blob(bool sync_write);
+
     future<blob_ptr> writing_sync_write_blob(size_t size);
+    future<> _sync_write_blobs_reserver;
+    future<> reserve_sync_write_blobs();
+    future<db::blobstore::blob_ptr> new_sync_write_blob();
+
     future<std::vector<blob_descriptor>> list_blobs(sstring &dirname) const;
-    future<> init_blobs_status(std::map<blob_id_type, blob_ptr> blobs);
+    future<> init_blobs_status(std::map<blob_id_type, blob_ptr>& blobs, bool synced);
+    future<blob_id_type> find_may_half_full_blob(const std::map<blob_id_type, blob_ptr>& blobs);
 
     // append payload to blob persistently
     future<payload_pos> append_payload(managed_bytes_view payload_view, size_t size, bool sync);
@@ -148,10 +160,16 @@ public:
     blob_id_type blob_id(){
         return _desc.id();
     }
+    sstring name(){
+        return _desc.filename();
+    }
     void set_sealed() { _sealed = true; };
     void set_file_pos(uint64_t file_pos) { _file_pos = file_pos; };
-    size_t get_max_size(){ return _max_size;};
+    size_t get_max_size(){ return _max_size; };
+    uint64_t get_file_pos(){ return _file_pos; };
+    bool sealed(){ return _sealed; };
     future<uint64_t> probe_actual_file_position();
+    future<bool> has_valid_header();
 
     bool sync_write() { return _desc.sync_write(); };
     future<payload_pos> append(managed_bytes_view payload_view, size_t size, bool need_flush);

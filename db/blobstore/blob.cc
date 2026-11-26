@@ -64,6 +64,25 @@ db::blob::probe_actual_file_position(){
     co_return _max_size;
 }
 
+future<bool>
+db::blob::has_valid_header(){
+    fragmented_temporary_buffer::reader frag_reader;
+    input_stream<char> fin = make_file_input_stream(_f, 0);
+    fragmented_temporary_buffer buf = co_await frag_reader.read_exactly(fin, blob_header_size);
+    auto in = buf.get_istream();
+    auto magic = read<uint32_t>(in);
+
+    if(magic == 0){
+        co_return false;
+    }
+    if (magic != blob_header_magic) {
+        blogger.info("{} is not a  blob file, {} != {}", _desc.filename(), magic, blob_header_magic);
+        throw invalid_blob_format();
+    }
+
+    co_return true;
+}
+
 future<db::payload_pos>
 db::blob::append(managed_bytes_view payload_view, size_t size, bool need_flush){
     SCYLLA_ASSERT(need_flush == _desc.sync_write());

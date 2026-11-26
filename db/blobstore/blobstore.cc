@@ -1,6 +1,7 @@
 #include "blobstore.hh"
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/future-util.hh>
+#include <seastar/core/sleep.hh>
 
 #include <boost/regex.hpp>
 #include <boost/range/adaptor/map.hpp>
@@ -10,9 +11,10 @@
 #include "utils/runtime.hh"
 #include "checked-file-impl.hh"
 #include "log.hh"
+#include "errors.hh"
 
 using namespace seastar;
-
+using namespace std::chrono_literals;
 static logging::logger bslogger("blobstore");
 
 const std::string db::blob_descriptor::SEPARATOR("-");
@@ -50,12 +52,15 @@ db::blobstore_config db::blobstore_config::from_db_config(const db::config& cfg)
     db::blobstore_config c;
     c.blobstore_dir_location = cfg.blobstore_directory();
     c.blob_size_in_mb = cfg.blob_size_mb();
+    c.max_reserve_blobs = cfg.max_reserve_blobs();
     return c;
 }
 
 db::blobstore::blobstore(blobstore_config &&cfg):
     _cfg(std::move(cfg))
     ,_blob_create_semaphore(1)
+    ,_reserved_sync_write_blobs(cfg.max_reserve_blobs)
+    ,_sync_write_blobs_reserver(make_ready_future<>())
 {
 
 }
@@ -83,43 +88,90 @@ future<> db::blobstore::init(){
         }else{
             _blobs[desc.id()] = blob_p;
         }
-        bslogger.info("init blob: {}, size {}, allocated_size {}, alignment {}", desc.filename(), stat.size, stat.allocated_size, align);
+        bslogger.debug("open blob: {}, size {}, allocated_size {}, alignment {}", desc.filename(), stat.size, stat.allocated_size, align);
 
         base_id = std::max(base_id, desc.id() & base_mask);
     }
 
-    co_await init_blobs_status(_sync_write_blobs);
-    co_await init_blobs_status(_blobs);
+    co_await init_blobs_status(_sync_write_blobs, true);
+    co_await init_blobs_status(_blobs, false);
 
     // base blob_id : [shard_id | ts_base_id]
     blob_id = ( blob_id_type(this_shard_id()) << max_base_bits ) | base_id;
-    bslogger.info("blobstore init finish.  blob_id {}, ts_base_id {}", blob_id, base_id);
+
+    // start background task to reserve sync write blobs in low priority
+    _sync_write_blobs_reserver = reserve_sync_write_blobs();
+
+    bslogger.info("blobs init finished. there are "
+                  " {} sync-write-blobs,"
+                  " {} non-sync-write-blobs,"
+                  " {} reserved sync-write-blobs,"
+                  " blob_id {}, ts_base_id {} ",
+                  _sync_write_blobs.size(), _blobs.size(), _reserved_sync_write_blobs.size(),
+                  blob_id, base_id);
 }
 
 
 future<>
-db::blobstore::init_blobs_status(std::map<blob_id_type, blob_ptr> blobs){
+db::blobstore::init_blobs_status(std::map<blob_id_type, blob_ptr>& blobs, bool synced){
     if(blobs.empty()){
         co_return;
     }
 
-    blob_ptr last_blob = std::prev(blobs.end())->second;
-    // probe the real file_pos
-    auto file_pos = co_await last_blob->probe_actual_file_position();
-    last_blob->set_file_pos(file_pos);
-    SCYLLA_ASSERT(file_pos <= last_blob->get_max_size());
-    if(last_blob->get_max_size() == file_pos){
-        last_blob->set_sealed();
+    std::map<blob_id_type, blob_ptr>::iterator may_half_full_blob_it;
+    if(!synced){
+        // 1.1 for non-sync-write blob, only the last one may be half-full
+        may_half_full_blob_it = std::prev(blobs.end());
+    }else{
+        // 1.2 for sync-write blob, because of reserved blobs, we need find which one is half full
+        auto may_half_full_blob_id = co_await find_may_half_full_blob(blobs);
+        may_half_full_blob_it = blobs.find(may_half_full_blob_id);
+        // move all blobs next may_half_full_blob from _sync_write_blobs to _reserved_sync_write_blobs
+        for (auto it = std::next(may_half_full_blob_it); it != blobs.end(); ++it) {
+            bool added = _reserved_sync_write_blobs.push(std::move(it->second));
+            if(!added){
+                // todo user may change max_reserve_blobs option to a small number,
+                // in this case we need delete those extra blob file
+                throw Unsupported_change_max_reserve_blobs();
+            }
+        }
+        blobs.erase(std::next(may_half_full_blob_it), blobs.end());
     }
 
-    // we assume only the last blob may be half-full
-    // so just set all blob sealed except last one
-    for (auto it = blobs.begin(); it != std::prev(blobs.end()); ++it) {
+    // 2 probe the may_half_full_blob real file pos
+    auto file_pos = co_await may_half_full_blob_it->second->probe_actual_file_position();
+    may_half_full_blob_it->second->set_file_pos(file_pos);
+    SCYLLA_ASSERT(file_pos <= may_half_full_blob_it->second->get_max_size());
+    if(may_half_full_blob_it->second->get_max_size() == file_pos){
+        may_half_full_blob_it->second->set_sealed();
+    }
+
+    // 3 set all blob before may_half_full_blob sealed
+    for (auto it = blobs.begin(); it != may_half_full_blob_it; ++it) {
         it->second->set_file_pos(it->second->get_max_size());
         it->second->set_sealed();
     }
 
+    bslogger.debug("----------------------{} blobs info ----------------------", synced ? "sync write" : "");
+    for (auto it = blobs.begin(); it != blobs.end(); ++it) {
+        bslogger.debug("blob {} max_size {}, file pos {}, sealed {}",
+                      it->second->name(), it->second->get_max_size(), it->second->get_file_pos(), it->second->sealed());
+    }
+
     co_return;
+}
+
+future<db::blob_id_type>
+db::blobstore::find_may_half_full_blob(const std::map<blob_id_type, blob_ptr>& blobs){
+    for (auto it = std::prev(blobs.end()); it != blobs.begin(); --it) {
+        auto res = co_await it->second->has_valid_header();
+        if(res){
+            co_return it->first;
+        }
+        bslogger.debug("{} not has valid header", it->second->name());
+    }
+
+    co_return blobs.begin()->first;
 }
 
 
@@ -230,26 +282,39 @@ future<db::blobstore::blob_ptr> db::blobstore::writing_blob(size_t size) {
 }
 
 future<db::blobstore::blob_ptr> db::blobstore::writing_sync_write_blob(size_t size) {
-    if (_sync_write_blobs.empty() || !_sync_write_blobs.rbegin()->second->is_still_writing(size)) {
-        return _blob_create_semaphore.wait().then([this, size]() {
-            // double check
-            if (_sync_write_blobs.empty() || !_sync_write_blobs.rbegin()->second->is_still_writing(size)) {
-                return new_blob(true);
-            }else{
-               return make_ready_future<blob_ptr>(_sync_write_blobs.rbegin()->second);
+    for (;;) {
+        if (!_sync_write_blobs.empty() && _sync_write_blobs.rbegin()->second->is_still_writing(size)) {
+            co_return _sync_write_blobs.rbegin()->second;
+        }
+
+        if (!_sync_write_blob_allocating) {
+            auto f = new_blob(true);
+            // must check that we are not already done.
+            try {
+                if (f.available()) {
+                    // f resolved immediately
+                    f.get(); // maybe force exception
+                    continue;
+                }
+            } catch (...) {
+                bslogger.error("Failed to create new sync write blob : {}", std::current_exception());
+                continue;
             }
-        }).finally([this]() {
-            _blob_create_semaphore.signal();
-        });
+
+            // consumer waiting on get_future() until
+            // f resolved and _sync_write_blob_allocating set to nullopt
+            _sync_write_blob_allocating.emplace(f.discard_result().finally([this] {
+                _sync_write_blob_allocating = std::nullopt;
+            }));
+        }
+        co_await _sync_write_blob_allocating->get_future();
     }
-    return make_ready_future<blob_ptr>(_sync_write_blobs.rbegin()->second);
 }
 
 future<db::blobstore::blob_ptr> db::blobstore::new_blob(bool sync_write){
-    blob_descriptor d(next_blob_id(), sync_write);
-    size_t max_size = _cfg.blob_size_in_mb << 20;
-
     if(!sync_write){
+        blob_descriptor d(next_blob_id(), sync_write);
+        size_t max_size = _cfg.blob_size_in_mb << 20;
         // open file without o_dsync, no need preallocate and zero-filled
         auto f = co_await open_file_dma(_cfg.blobstore_dir_location + "/" + d.filename(), open_flags::rw | open_flags::create);
         co_await f.truncate(max_size);
@@ -262,6 +327,39 @@ future<db::blobstore::blob_ptr> db::blobstore::new_blob(bool sync_write){
         co_return blob_p;
     }
 
+    // obtain reserved writable sync write blob
+    auto blob = co_await _reserved_sync_write_blobs.pop_eventually();
+    bslogger.info("blob {} pushed to _sync_write_blobs", blob->name());
+    _sync_write_blobs[blob->blob_id()] = blob;
+    co_return blob;
+}
+
+future<> db::blobstore::reserve_sync_write_blobs() {
+    while (!_shutdown) {
+        co_await _reserved_sync_write_blobs.not_full();
+        if (_shutdown) {
+            break;
+        }
+        try {
+            auto blob = co_await new_sync_write_blob();
+            auto blob_name = blob->name();
+            auto ret = _reserved_sync_write_blobs.push(std::move(blob));
+            if (!ret) {
+                bslogger.error("blob reserve is full! Ignoring and trying to continue, rare happen");
+            }
+            bslogger.info("reserved blob {} created and pushed to _reserved_sync_write_blobs , curr count {}",
+                          blob_name, _reserved_sync_write_blobs.size());
+            continue;
+        } catch (...) {
+            bslogger.error("Exception in blob reservation: {}", std::current_exception());
+        }
+        co_await seastar::sleep(100ms);
+    }
+}
+
+future<db::blobstore::blob_ptr> db::blobstore::new_sync_write_blob(){
+    blob_descriptor d(next_blob_id(), true);
+    size_t max_size = _cfg.blob_size_in_mb << 20;
     //open without do_dsync for pre-allocation
     auto f = co_await open_file_dma(_cfg.blobstore_dir_location + "/" + d.filename(), open_flags::rw | open_flags::create);
     co_await f.allocate(0, max_size);
@@ -301,7 +399,6 @@ future<db::blobstore::blob_ptr> db::blobstore::new_blob(bool sync_write){
     align = f.disk_write_dma_alignment();
 
     blob_ptr blob_p= make_shared<blob>(this, std::move(f), d, align, size);
-    _sync_write_blobs[d.id()] = blob_p;
     bslogger.info("blob file {} opening with o_dsync created. alignment {}, max size {}", d.filename(), align, size);
     co_return blob_p;
 }

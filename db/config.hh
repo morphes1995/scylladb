@@ -425,6 +425,7 @@ public:
     named_value<sstring> s3_address;
 
     named_value<uint32_t> blob_size_mb;
+    named_value<uint16_t> max_reserve_blobs;
     named_value<uint32_t> object_payload_inline_threshold;
     named_value<uint32_t> object_payload_inline_threshold_when_flush;
 
